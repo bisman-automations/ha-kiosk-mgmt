@@ -1,0 +1,33 @@
+{
+  "domain": "kiosk_mgmt",
+  "name": "Kiosk Mgmt",
+  "after_dependencies": ["esphome", "frontend", "http"],
+  "codeowners": ["@donavanbecker"],
+  "config_flow": true,
+  "documentation": "https://github.com/bisman-automations/ha-kiosk-mgmt",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/bisman-automations/ha-kiosk-mgmt/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_kiosk-satellite._tcp.local."
+    },
+    {
+      "type": "_esphomelib._tcp.local.",
+      "properties": {
+        "project_name": "kiosk_satellite.*"
+      }
+    },
+    {
+      "name": "ks-*",
+      "type": "_esphomelib._tcp.local."
+    },
+    {
+      "name": "kiosk-satellite-*",
+      "type": "_esphomelib._tcp.local."
+    }
+  ]
+}

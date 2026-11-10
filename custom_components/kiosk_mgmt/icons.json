@@ -1,0 +1,19 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "connectivity": {
+        "default": "mdi:tablet"
+      }
+    },
+    "sensor": {
+      "last_seen": {
+        "default": "mdi:clock-check-outline"
+      }
+    }
+  },
+  "services": {
+    "refresh": "mdi:refresh",
+    "ignore_kiosk": "mdi:eye-off",
+    "remove_kiosk": "mdi:delete"
+  }
+}

@@ -1,0 +1,15 @@
+refresh:
+ignore_kiosk:
+  fields:
+    kiosk_id:
+      required: true
+      example: "fleet:example"
+      selector:
+        text:
+remove_kiosk:
+  fields:
+    kiosk_id:
+      required: true
+      example: "fleet:example"
+      selector:
+        text:

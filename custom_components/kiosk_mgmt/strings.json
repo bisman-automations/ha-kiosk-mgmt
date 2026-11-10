@@ -1,0 +1,195 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a Kiosk Satellite",
+        "description": "Type the tablet's address. Kiosk Mgmt tries HTTPS and then HTTP on the admin port unless you choose one. Leave certificate checking off for the self-signed certificate Kiosk Satellite creates.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "scheme": "Protocol",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "host": "IP address or host name, with no http:// prefix.",
+          "port": "Remote Administration port. 2324 unless you changed it on the tablet.",
+          "scheme": "Detect automatically tries HTTPS first, then HTTP.",
+          "verify_ssl": "Off trusts the tablet's own certificate. On requires a certificate this Home Assistant already trusts."
+        }
+      },
+      "confirm": {
+        "title": "Set up Kiosk Mgmt",
+        "description": "Found {name} at {host} ({model}). Kiosk Mgmt will keep looking for other Kiosk Satellite tablets on this network."
+      },
+      "reconfigure": {
+        "title": "Choose a kiosk",
+        "description": "Pick the tablet whose address or certificate check you want to change.",
+        "data": {
+          "kiosk_id": "Kiosk"
+        }
+      },
+      "reconfigure_connection": {
+        "title": "Update {name}",
+        "description": "Protocol, port, and certificate checking for this tablet.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "scheme": "Protocol",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "scheme": "Detect automatically tries HTTPS first, then HTTP.",
+          "verify_ssl": "Off trusts the tablet's own certificate."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't reach a Kiosk Satellite admin page at that address. Remote Administration has to be on, with a password set.",
+      "invalid_host": "Enter a host name or IP address and a port from 1 to 65535.",
+      "ssl_error": "The tablet answered on HTTPS, but the certificate check failed. Turn off Verify SSL certificate for a self-signed certificate.",
+      "already_tracked": "That tablet is already in Kiosk Mgmt."
+    },
+    "abort": {
+      "already_configured": "Kiosk Mgmt is already set up. Newly found tablets are added to it.",
+      "cannot_connect": "Can't reach a Kiosk Satellite admin page at that address.",
+      "no_kiosks": "No kiosks to change yet.",
+      "not_kiosk_satellite": "That advertisement is not a Kiosk Satellite.",
+      "single_instance_allowed": "Kiosk Mgmt is already set up. Add another tablet from its options."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Kiosk Mgmt",
+        "description": "Add a tablet by address, or change one that was already found.",
+        "menu_options": {
+          "add": "Add a kiosk",
+          "manage": "Manage kiosks"
+        }
+      },
+      "add": {
+        "title": "Add a kiosk",
+        "description": "Type the tablet's address. Detection tries HTTPS first, then HTTP.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "scheme": "Protocol",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "host": "IP address or host name, with no http:// prefix.",
+          "port": "Remote Administration port. 2324 unless you changed it on the tablet.",
+          "scheme": "Detect automatically tries HTTPS first, then HTTP.",
+          "verify_ssl": "Off trusts the tablet's own certificate. On requires a certificate this Home Assistant already trusts."
+        }
+      },
+      "manage": {
+        "title": "Manage kiosks",
+        "data": {
+          "kiosk_id": "Kiosk"
+        }
+      },
+      "kiosk": {
+        "title": "{name}",
+        "description": "Edit the address, ignore the tablet, or remove it.",
+        "menu_options": {
+          "edit": "Edit connection",
+          "ignore": "Ignore",
+          "include": "Show again",
+          "remove": "Remove"
+        }
+      },
+      "edit": {
+        "title": "Update {name}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "scheme": "Protocol",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "scheme": "Detect automatically tries HTTPS first, then HTTP.",
+          "verify_ssl": "Off trusts the tablet's own certificate."
+        }
+      },
+      "ignore": {
+        "title": "Ignore {name}",
+        "description": "{name} will disappear from the panel and will not be added again when it is discovered. You can show it again from this screen."
+      },
+      "include": {
+        "title": "Show {name} again",
+        "description": "{name} will be probed and shown in the panel."
+      },
+      "remove": {
+        "title": "Remove {name}",
+        "description": "{name} will be removed. If the tablet is still on the network, discovery can add it again."
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't reach a Kiosk Satellite admin page at that address. Remote Administration has to be on, with a password set.",
+      "invalid_host": "Enter a host name or IP address and a port from 1 to 65535.",
+      "ssl_error": "The tablet answered on HTTPS, but the certificate check failed. Turn off Verify SSL certificate for a self-signed certificate.",
+      "already_tracked": "That tablet is already in Kiosk Mgmt."
+    },
+    "abort": {
+      "no_kiosks": "No kiosks to change yet."
+    }
+  },
+  "selector": {
+    "scheme": {
+      "options": {
+        "auto": "Detect automatically",
+        "http": "HTTP",
+        "https": "HTTPS"
+      }
+    }
+  },
+  "issues": {
+    "offline": {
+      "title": "{name} is offline",
+      "description": "Kiosk Mgmt cannot reach {name} at {host}. Check that the tablet is on, and that Remote Administration in Kiosk Satellite is on with a password set."
+    },
+    "certificate": {
+      "title": "{name} certificate is not trusted",
+      "description": "The certificate for {name} at {host} failed verification. Kiosk Satellite uses a self-signed certificate unless you imported one. Turn off Verify SSL certificate for this kiosk, or give it a certificate this Home Assistant trusts."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connectivity": {
+        "name": "Connectivity"
+      }
+    },
+    "sensor": {
+      "last_seen": {
+        "name": "Last seen"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Probe every Kiosk Satellite now."
+    },
+    "ignore_kiosk": {
+      "name": "Ignore kiosk",
+      "description": "Stop managing a kiosk. It stays ignored if it is discovered again.",
+      "fields": {
+        "kiosk_id": {
+          "name": "Kiosk",
+          "description": "The id of the kiosk to ignore."
+        }
+      }
+    },
+    "remove_kiosk": {
+      "name": "Remove kiosk",
+      "description": "Remove a kiosk. A later discovery can add it again.",
+      "fields": {
+        "kiosk_id": {
+          "name": "Kiosk",
+          "description": "The id of the kiosk to remove."
+        }
+      }
+    }
+  }
+}
