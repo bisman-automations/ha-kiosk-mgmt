@@ -1,6 +1,13 @@
 import { LitElement, css, html } from "lit";
 
-import { FRAME_LOAD_TIMEOUT_MS, PROXY_SOURCE, frameMode } from "./logic.mjs";
+import {
+  FRAME_LOAD_TIMEOUT_MS,
+  PROXY_SOURCE,
+  frameMode,
+  panelHeightPx,
+  stretchedContainerBottom,
+  subresourceNotice,
+} from "./logic.mjs";
 
 /**
  * Admin sidebar panel: one tab per Kiosk Satellite.
@@ -10,6 +17,11 @@ import { FRAME_LOAD_TIMEOUT_MS, PROXY_SOURCE, frameMode } from "./logic.mjs";
  * cookie it sets, without navigating the iframe away from the page the
  * user is on. If the frame never reports that it loaded, the tab shows a
  * message, a retry, and a direct link to the tablet.
+ *
+ * `ha-panel-custom` does not give this element a height, so percentage
+ * heights collapse and the iframe stays a short strip. `_fit` measures the
+ * viewport (or a tall ancestor) and sets an explicit pixel height, and the
+ * iframe then fills whatever is left under the tab and the details row.
  */
 class KioskMgmtPanel extends LitElement {
   static properties = {
@@ -22,6 +34,7 @@ class KioskMgmtPanel extends LitElement {
     _attempt: { state: true },
     _iframeUrl: { state: true },
     _openUrl: { state: true },
+    _problem: { state: true },
   };
 
   constructor() {
@@ -32,23 +45,47 @@ class KioskMgmtPanel extends LitElement {
     this._attempt = 0;
     this._iframeUrl = null;
     this._openUrl = null;
+    this._problem = null;
     this._unsub = null;
     this._pending = false;
     this._timer = 0;
     this._renewTimer = 0;
     this._signGen = 0;
+    this._fitQueued = 0;
+    this._observer = null;
     this._onMessage = (event) => this._handleMessage(event);
+    this._onResize = () => this._scheduleFit();
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener("message", this._onMessage);
+    window.addEventListener("resize", this._onResize);
+    window.visualViewport?.addEventListener("resize", this._onResize);
+    window.visualViewport?.addEventListener("scroll", this._onResize);
+    this._observer = new ResizeObserver(() => this._scheduleFit());
+    this._observer.observe(document.documentElement);
+    if (this.parentElement) {
+      this._observer.observe(this.parentElement);
+    }
     this._subscribe();
+    this._scheduleFit();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener("message", this._onMessage);
+    window.removeEventListener("resize", this._onResize);
+    window.visualViewport?.removeEventListener("resize", this._onResize);
+    window.visualViewport?.removeEventListener("scroll", this._onResize);
+    if (this._observer) {
+      this._observer.disconnect();
+      this._observer = null;
+    }
+    if (this._fitQueued) {
+      window.cancelAnimationFrame(this._fitQueued);
+      this._fitQueued = 0;
+    }
     this._clearTimers();
     if (this._unsub) {
       this._unsub();
@@ -63,6 +100,60 @@ class KioskMgmtPanel extends LitElement {
     if (changed.has("_selected") || changed.has("_attempt")) {
       this._sign(true);
     }
+    if (this._observer && this.parentElement) {
+      this._observer.observe(this.parentElement);
+    }
+    this._scheduleFit();
+  }
+
+  /**
+   * Give the host a used height. Percentage heights collapse inside
+   * `ha-panel-custom`, which has no height of its own.
+   */
+  _scheduleFit() {
+    if (this._fitQueued) {
+      return;
+    }
+    this._fitQueued = window.requestAnimationFrame(() => {
+      this._fitQueued = 0;
+      this._fit();
+    });
+  }
+
+  _fit() {
+    if (!this.isConnected) {
+      return;
+    }
+    const rect = this.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const viewportHeight = viewport
+      ? viewport.offsetTop + viewport.height
+      : window.innerHeight;
+    const parent = this.parentElement;
+    const bottomInset = parent
+      ? Number.parseFloat(getComputedStyle(parent).paddingBottom) || 0
+      : 0;
+    let containerBottom = null;
+    let node = parent;
+    while (node && node !== document.body) {
+      const box = node.getBoundingClientRect();
+      const edge = stretchedContainerBottom(box.height, viewportHeight, box.bottom);
+      if (edge != null) {
+        containerBottom = edge;
+        break;
+      }
+      node = node.parentElement;
+    }
+    const height = panelHeightPx({
+      top: rect.top,
+      viewportHeight,
+      bottomInset,
+      containerBottom,
+    });
+    if (height == null) {
+      return;
+    }
+    this.style.height = `${height}px`;
   }
 
   async _subscribe() {
@@ -94,6 +185,7 @@ class KioskMgmtPanel extends LitElement {
     this._selected = id;
     this._frame = "pending";
     this._iframeUrl = null;
+    this._problem = null;
     this._attempt += 1;
   }
 
@@ -118,6 +210,7 @@ class KioskMgmtPanel extends LitElement {
       if (navigate) {
         this._iframeUrl = result.url;
         this._frame = "pending";
+        this._problem = null;
         this._armLoadTimer();
       }
       this._armRenew(result.expires_in);
@@ -188,6 +281,13 @@ class KioskMgmtPanel extends LitElement {
     if (!data || data.source !== PROXY_SOURCE) {
       return;
     }
+    if (data.kind === "subresource") {
+      this._problem = {
+        status: data.status,
+        via: data.via === "home-assistant" ? "home-assistant" : "tablet",
+      };
+      return;
+    }
     if (data.ok) {
       if (this._timer) {
         window.clearTimeout(this._timer);
@@ -202,6 +302,7 @@ class KioskMgmtPanel extends LitElement {
   _retry() {
     this._frame = "pending";
     this._iframeUrl = null;
+    this._problem = null;
     this._attempt += 1;
   }
 
@@ -259,6 +360,12 @@ class KioskMgmtPanel extends LitElement {
         <div><span>Last seen</span><strong>${seen}</strong></div>
         <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a>
       </section>
+      ${this._problem
+        ? html`<div class="banner" role="status">
+            ${subresourceNotice(this._problem.status, this._problem.via)}
+          </div>`
+        : ""}
+      <div class="stage">
       ${mode === "error"
         ? html`
             <div class="card">
@@ -288,23 +395,36 @@ class KioskMgmtPanel extends LitElement {
               @error=${() => {
                 this._frame = "failed";
               }}
-            ></iframe>
-          `}
+              ></iframe>
+            `}
+      </div>
     `;
   }
 
   static styles = css`
     :host {
-      display: block;
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
       height: 100%;
-      background: var(--primary-background-color, #111);
-      color: var(--primary-text-color, #e8e8e8);
+      min-height: 0;
+      overflow: hidden;
+      background: var(--primary-background-color, #fafafa);
+      color: var(--primary-text-color, #212121);
     }
     .wrap {
       display: flex;
       flex-direction: column;
+      flex: 1 1 auto;
       height: 100%;
+      min-height: 0;
       box-sizing: border-box;
+    }
+    .stage {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
     }
     header {
       display: flex;
@@ -379,10 +499,35 @@ class KioskMgmtPanel extends LitElement {
       color: var(--primary-color, #03a9f4);
     }
     iframe {
-      flex: 1;
+      flex: 1 1 auto;
       width: 100%;
+      height: 100%;
+      min-height: 0;
       border: 0;
-      background: var(--primary-background-color, #111);
+      background: #fff;
+    }
+    .banner {
+      flex: 0 0 auto;
+      margin: 0 16px 8px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--warning-color, #ff9800);
+      color: #fff;
+    }
+    @media (max-width: 600px) {
+      header {
+        padding: 8px 12px 0;
+      }
+      .tabs {
+        padding: 8px 12px;
+      }
+      .info {
+        gap: 8px 12px;
+        padding: 0 12px 8px;
+      }
+      .banner {
+        margin: 0 12px 8px;
+      }
     }
     .card,
     .empty {

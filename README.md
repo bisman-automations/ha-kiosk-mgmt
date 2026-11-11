@@ -96,14 +96,19 @@ with its name, IP address, model, whether it is online, and when it was last
 seen, plus **Open in new tab**.
 
 The admin page is loaded through Home Assistant, not straight from the
-tablet. That is what lets the tab show a self-signed certificate, and a
-plain HTTP tablet, while Home Assistant itself is open over HTTPS. Only an
-administrator can open the proxied page. **Open in new tab** uses the same
-proxied address.
+tablet, and the embedded page fills the tab. That is what lets the tab show
+a self-signed certificate, and a plain HTTP tablet, while Home Assistant
+itself is open over HTTPS. Log in with the password you set on the tablet.
+Only an administrator can open the proxied page. **Open in new tab** uses
+the same proxied address.
 
-If the page does not load, the tab says so instead of leaving a blank area.
-**Retry** asks again. **Open tablet directly** is the tablet's own address,
-which may ask the browser to trust the certificate.
+Styles, scripts and live updates from the tablet load through that same
+address, including the login request. If part of the page fails, the tab
+says whether Home Assistant or the tablet refused it.
+
+If the page does not load at all, the tab says so instead of leaving a blank
+area. **Retry** asks again. **Open tablet directly** is the tablet's own
+address, which may ask the browser to trust the certificate.
 
 ### Entities
 
@@ -126,6 +131,18 @@ it back. **Remove** forgets it, so a later discovery can add it again.
 - **The tab says it can't load the admin page.** Choose **Retry**. If that
   still fails, use **Open tablet directly**. A certificate warning in that
   tab is the browser's own check; Kiosk Mgmt's pin is separate.
+- **The page stops after the logo, or the password field is cut off.** Update
+  Kiosk Mgmt. The embedded page should fill the tab. If a current version
+  still shows only a short strip, say so in an issue and include a screenshot.
+- **The password is correct and the page stays on the login card.** The
+  browser's console shows 401. The tab says whether that refusal came from
+  the tablet or from Home Assistant. Turn on debug logging (below), try the
+  password again, and look for lines starting with `Proxied`. A line that
+  ends in `(401)` on `/api/login` is the tablet rejecting the password. A
+  401 on `/api/info` or another path after a successful login is the session
+  not reaching the tablet. Include that log with the issue.
+- **Part of the page failed.** A banner above the embedded page names the
+  status and which side refused the request. Debug logging lists the path.
 - **Certificate changed.** A repair named for the tablet means the
   certificate no longer matches the one Kiosk Mgmt pinned. Accept the new
   fingerprint from the repair, or from the tablet's reconfigure screen, only
@@ -151,7 +168,8 @@ pytest
 ```
 
 The sidebar panel is built with `npm run build` from `frontend/panel.js`.
-`node --test tests/*.mjs` checks the frame rules.
+That also copies `frontend/shim.mjs` into the integration. `node --test
+tests/*.mjs` checks the frame rules, the panel height, and the proxy shim.
 
 CI also tests the oldest supported Home Assistant (`requirements_test_min.txt`)
 and runs hassfest and the HACS checks. Releases are drafted automatically from

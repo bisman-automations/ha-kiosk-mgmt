@@ -25,6 +25,8 @@ anything.
   - `frontend/kiosk-mgmt-panel.js`: the built Lit panel (source in
     `frontend/` at the repo root; `npm run build` refreshes it).
 - `frontend/`: panel source. `logic.mjs` is the part the Node tests import.
+  `shim.mjs` is the iframe hook; `npm run build` copies it next to the
+  built panel so the proxy can serve the same file the tests import.
 - `tests/`: pytest, plus `tests/panel.test.mjs`.
 - `README.md` is user documentation; `CHANGELOG.md` is the release history.
 
@@ -89,10 +91,24 @@ The panel does not embed the tablet directly. The iframe loads
 `/api/kiosk_mgmt/proxy/{entry_id}/{kiosk_id}/` with a short-lived signed
 path (`async_sign_path`). That response sets an HttpOnly cookie so the
 embedded app's later requests, including POST and websockets, are
-authorized. The proxy uses the pinned connection, rewrites redirects and
-absolute URLs onto the prefix, and strips `X-Frame-Options` and CSP
-`frame-ancestors`. If the frame does not load, the tab shows a message, a
-retry, and a direct link to the tablet. Open in new tab uses the proxy too.
+authorized. The cookie covers every method and every path under the prefix.
+`ha-panel-custom` has no height of its own, so the panel sets its own
+pixel height from the viewport and the iframe fills what remains.
+
+The tablet's admin client sends its session as `Authorization: Bearer`.
+Home Assistant reads that header as its own token, and the proxy used to
+drop it, so a correct password came back as the tablet's 401. The shim in
+`shim.mjs` moves the token to `X-Kiosk-Authorization`; the proxy restores
+it upstream and also forwards an `Authorization` value that is not a Home
+Assistant access token. A token Home Assistant accepted is never forwarded.
+Root-absolute URLs, websockets, EventSource, forms and location changes are
+rewritten onto the prefix. `Set-Cookie` loses `Domain`, keeps `Path` under
+the prefix, uses `SameSite=Lax`, and keeps `Secure` only when Home
+Assistant is HTTPS. Gzip bodies are decoded before rewriting. CSP is
+removed so it cannot block the shim. Debug logs record each proxied
+request and upstream error without the password or the token. If a
+subresource fails, the panel says whether Home Assistant or the tablet
+refused it. Open in new tab uses the proxy too.
 
 No secrets are stored. Entity state is connectivity and last seen.
 

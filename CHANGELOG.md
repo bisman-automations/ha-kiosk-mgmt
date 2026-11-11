@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-11-11
+
+### Added
+
+- Debug logging for each request the sidebar sends to a tablet, and for the
+  error when a tablet cannot be reached. Passwords and login tokens are not
+  written to the log.
+
+### Fixed
+
+- The sidebar shows the whole Kiosk Satellite admin page. The embedded page
+  fills the tab on a desktop and on a phone, instead of stopping after the
+  logo.
+- Logging in from the sidebar works with the tablet's password. The tablet's
+  own login token is passed through to the tablet. It used to be removed on
+  the way, the tablet answered 401, and the page stayed on the login card.
+- Scripts, styles and live updates from the tablet load through Home
+  Assistant, including websockets. A cookie set by the tablet stays on this
+  page. If part of the page still fails, the tab says whether Home Assistant
+  or the tablet refused it.
+
 ## [0.1.1] - 2026-11-10
 
 ### Added
@@ -47,5 +68,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.2]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bisman-automations/ha-kiosk-mgmt/releases/tag/v0.1.0

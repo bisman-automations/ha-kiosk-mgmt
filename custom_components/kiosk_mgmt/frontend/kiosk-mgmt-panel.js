@@ -558,6 +558,46 @@
   }
   var FRAME_LOAD_TIMEOUT_MS = 8e3;
   var PROXY_SOURCE = "kiosk-mgmt-proxy";
+  function panelHeightPx(box) {
+    const top = Number(box.top);
+    const viewportHeight = Number(box.viewportHeight);
+    if (!Number.isFinite(top) || !Number.isFinite(viewportHeight)) {
+      return null;
+    }
+    const inset = Number(box.bottomInset);
+    const bottomInset = Number.isFinite(inset) ? inset : 0;
+    const containerBottom = box.containerBottom == null ? Number.NaN : Number(box.containerBottom);
+    const limit = Number.isFinite(containerBottom) ? Math.min(viewportHeight, containerBottom) : viewportHeight;
+    return Math.max(0, Math.round(limit - top - bottomInset));
+  }
+  function stretchedContainerBottom(height, viewportHeight, bottom) {
+    const boxHeight = Number(height);
+    const viewport = Number(viewportHeight);
+    const edge = Number(bottom);
+    if (!Number.isFinite(boxHeight) || !Number.isFinite(viewport) || viewport <= 0 || !Number.isFinite(edge)) {
+      return null;
+    }
+    if (boxHeight >= viewport * 0.5) {
+      return edge;
+    }
+    return null;
+  }
+  function subresourceNotice(status, via) {
+    const code = Number(status) || 0;
+    if (via === "home-assistant" && (code === 401 || code === 403)) {
+      return `Home Assistant refused a request from the admin page (${code}). Refresh Kiosk Mgmt and try again.`;
+    }
+    if (code === 401 || code === 403) {
+      return `The tablet refused a request from the admin page (${code}). Retry the login. Debug logging for Kiosk Mgmt lists the request the tablet refused.`;
+    }
+    if (code === 502 || code === 503 || code === 504) {
+      return `Home Assistant could not reach the tablet for part of this page (${code}). Check that the tablet is on, then retry.`;
+    }
+    if (code) {
+      return `Part of the admin page did not load (${code}). Retry, or turn on debug logging for Kiosk Mgmt and reproduce it.`;
+    }
+    return "Part of the admin page did not load. Retry, or turn on debug logging for Kiosk Mgmt and reproduce it.";
+  }
 
   // frontend/panel.js
   var KioskMgmtPanel = class extends i4 {
@@ -570,7 +610,8 @@
       _frame: { state: true },
       _attempt: { state: true },
       _iframeUrl: { state: true },
-      _openUrl: { state: true }
+      _openUrl: { state: true },
+      _problem: { state: true }
     };
     constructor() {
       super();
@@ -580,21 +621,45 @@
       this._attempt = 0;
       this._iframeUrl = null;
       this._openUrl = null;
+      this._problem = null;
       this._unsub = null;
       this._pending = false;
       this._timer = 0;
       this._renewTimer = 0;
       this._signGen = 0;
+      this._fitQueued = 0;
+      this._observer = null;
       this._onMessage = (event) => this._handleMessage(event);
+      this._onResize = () => this._scheduleFit();
     }
     connectedCallback() {
       super.connectedCallback();
       window.addEventListener("message", this._onMessage);
+      window.addEventListener("resize", this._onResize);
+      window.visualViewport?.addEventListener("resize", this._onResize);
+      window.visualViewport?.addEventListener("scroll", this._onResize);
+      this._observer = new ResizeObserver(() => this._scheduleFit());
+      this._observer.observe(document.documentElement);
+      if (this.parentElement) {
+        this._observer.observe(this.parentElement);
+      }
       this._subscribe();
+      this._scheduleFit();
     }
     disconnectedCallback() {
       super.disconnectedCallback();
       window.removeEventListener("message", this._onMessage);
+      window.removeEventListener("resize", this._onResize);
+      window.visualViewport?.removeEventListener("resize", this._onResize);
+      window.visualViewport?.removeEventListener("scroll", this._onResize);
+      if (this._observer) {
+        this._observer.disconnect();
+        this._observer = null;
+      }
+      if (this._fitQueued) {
+        window.cancelAnimationFrame(this._fitQueued);
+        this._fitQueued = 0;
+      }
       this._clearTimers();
       if (this._unsub) {
         this._unsub();
@@ -608,6 +673,54 @@
       if (changed.has("_selected") || changed.has("_attempt")) {
         this._sign(true);
       }
+      if (this._observer && this.parentElement) {
+        this._observer.observe(this.parentElement);
+      }
+      this._scheduleFit();
+    }
+    /**
+     * Give the host a used height. Percentage heights collapse inside
+     * `ha-panel-custom`, which has no height of its own.
+     */
+    _scheduleFit() {
+      if (this._fitQueued) {
+        return;
+      }
+      this._fitQueued = window.requestAnimationFrame(() => {
+        this._fitQueued = 0;
+        this._fit();
+      });
+    }
+    _fit() {
+      if (!this.isConnected) {
+        return;
+      }
+      const rect = this.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const viewportHeight = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+      const parent = this.parentElement;
+      const bottomInset = parent ? Number.parseFloat(getComputedStyle(parent).paddingBottom) || 0 : 0;
+      let containerBottom = null;
+      let node = parent;
+      while (node && node !== document.body) {
+        const box = node.getBoundingClientRect();
+        const edge = stretchedContainerBottom(box.height, viewportHeight, box.bottom);
+        if (edge != null) {
+          containerBottom = edge;
+          break;
+        }
+        node = node.parentElement;
+      }
+      const height = panelHeightPx({
+        top: rect.top,
+        viewportHeight,
+        bottomInset,
+        containerBottom
+      });
+      if (height == null) {
+        return;
+      }
+      this.style.height = `${height}px`;
     }
     async _subscribe() {
       if (!this.hass || this._unsub || this._pending) {
@@ -635,6 +748,7 @@
       this._selected = id;
       this._frame = "pending";
       this._iframeUrl = null;
+      this._problem = null;
       this._attempt += 1;
     }
     async _sign(navigate) {
@@ -658,6 +772,7 @@
         if (navigate) {
           this._iframeUrl = result.url;
           this._frame = "pending";
+          this._problem = null;
           this._armLoadTimer();
         }
         this._armRenew(result.expires_in);
@@ -721,6 +836,13 @@
       if (!data || data.source !== PROXY_SOURCE) {
         return;
       }
+      if (data.kind === "subresource") {
+        this._problem = {
+          status: data.status,
+          via: data.via === "home-assistant" ? "home-assistant" : "tablet"
+        };
+        return;
+      }
       if (data.ok) {
         if (this._timer) {
           window.clearTimeout(this._timer);
@@ -734,6 +856,7 @@
     _retry() {
       this._frame = "pending";
       this._iframeUrl = null;
+      this._problem = null;
       this._attempt += 1;
     }
     async _refresh() {
@@ -784,6 +907,10 @@
         <div><span>Last seen</span><strong>${seen}</strong></div>
         <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a>
       </section>
+      ${this._problem ? b2`<div class="banner" role="status">
+            ${subresourceNotice(this._problem.status, this._problem.via)}
+          </div>` : ""}
+      <div class="stage">
       ${mode === "error" ? b2`
             <div class="card">
               <h2>Can't load the admin page</h2>
@@ -811,22 +938,35 @@
               @error=${() => {
         this._frame = "failed";
       }}
-            ></iframe>
-          `}
+              ></iframe>
+            `}
+      </div>
     `;
     }
     static styles = i`
     :host {
-      display: block;
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
       height: 100%;
-      background: var(--primary-background-color, #111);
-      color: var(--primary-text-color, #e8e8e8);
+      min-height: 0;
+      overflow: hidden;
+      background: var(--primary-background-color, #fafafa);
+      color: var(--primary-text-color, #212121);
     }
     .wrap {
       display: flex;
       flex-direction: column;
+      flex: 1 1 auto;
       height: 100%;
+      min-height: 0;
       box-sizing: border-box;
+    }
+    .stage {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
     }
     header {
       display: flex;
@@ -901,10 +1041,35 @@
       color: var(--primary-color, #03a9f4);
     }
     iframe {
-      flex: 1;
+      flex: 1 1 auto;
       width: 100%;
+      height: 100%;
+      min-height: 0;
       border: 0;
-      background: var(--primary-background-color, #111);
+      background: #fff;
+    }
+    .banner {
+      flex: 0 0 auto;
+      margin: 0 16px 8px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--warning-color, #ff9800);
+      color: #fff;
+    }
+    @media (max-width: 600px) {
+      header {
+        padding: 8px 12px 0;
+      }
+      .tabs {
+        padding: 8px 12px;
+      }
+      .info {
+        gap: 8px 12px;
+        padding: 0 12px 8px;
+      }
+      .banner {
+        margin: 0 12px 8px;
+      }
     }
     .card,
     .empty {

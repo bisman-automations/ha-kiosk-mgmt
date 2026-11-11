@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild frontend/panel.js --bundle --format=iife --outfile=custom_components/kiosk_mgmt/frontend/kiosk-mgmt-panel.js"
+    "build": "esbuild frontend/panel.js --bundle --format=iife --outfile=custom_components/kiosk_mgmt/frontend/kiosk-mgmt-panel.js && cp frontend/shim.mjs custom_components/kiosk_mgmt/frontend/shim.mjs"
   },
   "dependencies": {
     "lit": "3.3.3"

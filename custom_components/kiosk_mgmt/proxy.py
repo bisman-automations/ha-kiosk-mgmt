@@ -3,20 +3,36 @@
 The sidebar iframe cannot send Home Assistant's bearer token, and a signed
 path (``async_sign_path``) only authorizes one exact GET. The panel therefore
 loads a signed URL, and that response sets a short-lived HttpOnly cookie
-scoped to this kiosk. Later requests from the embedded app, including POST
-and websockets, present the cookie.
+scoped to this kiosk. Later requests from the embedded app, including POST,
+websockets and EventSource, present the cookie. The cookie is checked for
+every method and every path under the prefix. A signed path is not required
+again.
 
 ``requires_auth`` stays off on the view class because Home Assistant rejects
 the request before the handler when that flag is set, which would drop the
 cookie. ``_authorize`` applies the same rule itself: no credentials is 401,
 a signed-in user who is not an administrator is 403.
 
+The tablet's admin page sends its own session as ``Authorization: Bearer``.
+Home Assistant's auth middleware treats that header as a Home Assistant
+access token. On current Home Assistant an unknown bearer does not stop the
+request (the middleware only leaves it unauthenticated, and the cookie is
+what lets the view run). The header was still removed before the tablet saw
+it, so the tablet answered 401 and the login looked like it had failed. The
+injected shim moves the tablet token to ``X-Kiosk-Authorization`` so Home
+Assistant never has to accept it. The proxy puts that value back as
+``Authorization`` on the upstream request. A bearer that is not a valid
+Home Assistant token is forwarded as well, which covers a page whose shim
+did not run. A bearer Home Assistant did accept is never forwarded: that
+one is the administrator's token.
+
 The tablet is contacted with the pinned certificate (or the system trust
 store when Verify SSL certificate is on). Responses drop ``X-Frame-Options``
-and the CSP ``frame-ancestors`` directive so the panel can embed the page,
-and absolute URLs are rewritten onto the proxy prefix. Home Assistant's own
-header middleware then sets ``X-Frame-Options: SAMEORIGIN``, which still
-allows the panel because the iframe is on the Home Assistant origin.
+and Content-Security-Policy so the panel can embed the page and the shim
+can run. Absolute URLs are rewritten onto the proxy prefix where that is
+safe. Home Assistant's own header middleware then sets
+``X-Frame-Options: SAMEORIGIN``, which still allows the panel because the
+iframe is on the Home Assistant origin.
 """
 
 from __future__ import annotations
@@ -25,13 +41,16 @@ import asyncio
 import base64
 from collections.abc import Mapping
 from datetime import timedelta
+import gzip
 import hmac
 import json
 import logging
+from pathlib import Path
 import re
 import time
 from typing import Any
 from urllib.parse import quote, urlencode
+import zlib
 
 from aiohttp import ClientError, ClientTimeout, ClientWSTimeout, WSMsgType, web
 from aiohttp.client_exceptions import ServerFingerprintMismatch
@@ -63,8 +82,16 @@ from .tls import keyed_digest, pinned_ssl
 _LOGGER = logging.getLogger(__name__)
 
 PROXY_SOURCE = "kiosk-mgmt-proxy"
+# The iframe shim moves the tablet token here. Home Assistant does not
+# treat this name as one of its own credentials.
+KIOSK_AUTHORIZATION = "X-Kiosk-Authorization"
 _MAX_REWRITE = 8 * 1024 * 1024
+# Request bodies larger than this are streamed with the original
+# Content-Length (an APK upload). Smaller ones, including login, are
+# buffered so the tablet sees a Content-Length rather than chunked encoding.
+_MAX_BUFFER = 1024 * 1024
 _CHUNK = 64 * 1024
+_SHIM_PATH = Path(__file__).parent / "frontend" / "shim.mjs"
 _HOP = frozenset(
     {
         "connection",
@@ -84,8 +111,11 @@ _DROP_RESPONSE = _HOP | frozenset(
     {
         "x-frame-options",
         "strict-transport-security",
-        "content-encoding",
+        # A nonce or a strict script-src blocks the injected shim, and the
+        # page then never gets past the static header. The proxy cannot keep
+        # a policy that forbids the script it has to add.
         "content-security-policy",
+        "content-security-policy-report-only",
     }
 )
 _REWRITABLE = (
@@ -109,6 +139,19 @@ _CSS_URL = re.compile(
     r"""url\(\s*(?P<quote>["']?)(?P<url>[^)"']+)(?P=quote)\s*\)""",
     re.IGNORECASE,
 )
+_CSS_IMPORT = re.compile(
+    r"""@import\s+(?P<quote>["'])(?P<url>[^"']+)(?P=quote)""",
+    re.IGNORECASE,
+)
+_SRCSET = re.compile(
+    r"""(?P<attr>\bsrcset\s*=\s*)(?P<quote>["'])(?P<value>[^"']+)(?P=quote)""",
+    re.IGNORECASE,
+)
+# Quoted ``/static/...`` paths in a script. ``/api/...`` strings are left
+# alone: the tablet's client uses them as command names (`core.js`) and
+# resolves them with ``apiUrl`` at runtime.
+_QUOTED_STATIC = re.compile(r"""(?P<quote>["'])/static/(?P<rest>[^"'\\\s?#]*)""")
+_TOKEN_QUERY = re.compile(r"(token=)[^&]*", re.IGNORECASE)
 
 
 def kiosk_segment(kiosk_id: str) -> str:
@@ -201,12 +244,15 @@ def strip_frame_ancestors(policy: str) -> str:
     return "; ".join(kept)
 
 
-def rewrite_set_cookie(header: str, *, prefix: str) -> str:
-    """Keep a tablet cookie on the proxy path and off the tablet's domain.
+def rewrite_set_cookie(header: str, *, prefix: str, secure: bool) -> str:
+    """Keep a tablet cookie on the proxy path and on this Home Assistant.
 
-    ``Domain`` would otherwise attach the cookie to the tablet's host, which
-    the browser never sends back to Home Assistant. ``Path=/`` would attach
-    it to every Home Assistant page.
+    ``Domain`` would attach the cookie to the tablet's host, which the
+    browser never sends back to Home Assistant. ``Path=/`` would attach it
+    to every Home Assistant page. ``Secure`` is kept only when Home
+    Assistant itself is HTTPS, so an HTTP Home Assistant can still store the
+    cookie. ``SameSite`` is ``Lax``: the iframe is same-site with Home
+    Assistant, and ``None`` without ``Secure`` is dropped by the browser.
     """
     pieces = [piece.strip() for piece in header.split(";") if piece.strip()]
     if not pieces:
@@ -215,11 +261,14 @@ def rewrite_set_cookie(header: str, *, prefix: str) -> str:
     saw_path = False
     for piece in pieces[1:]:
         name, _, raw = piece.partition("=")
-        if name.lower() == "domain":
+        lowered = name.lower()
+        if lowered in {"domain", "secure", "samesite"}:
             continue
-        if name.lower() == "path":
+        if lowered == "path":
             saw_path = True
             path = raw.strip() or "/"
+            if not path.startswith("/"):
+                path = f"/{path}"
             if not _already(path, prefix):
                 path = prefix if path == "/" else prefix + path
             rewritten.append(f"Path={path}")
@@ -227,6 +276,9 @@ def rewrite_set_cookie(header: str, *, prefix: str) -> str:
         rewritten.append(piece)
     if not saw_path:
         rewritten.append(f"Path={prefix}")
+    rewritten.append("SameSite=Lax")
+    if secure:
+        rewritten.append("Secure")
     return "; ".join(rewritten)
 
 
@@ -244,9 +296,17 @@ def rewrite_text(
     media = content_type.split(";", 1)[0].strip().lower()
     if media == "text/html":
         text = _ATTR_URL.sub(lambda match: _rewrite_attr(match, prefix), text)
+        text = _SRCSET.sub(lambda match: _rewrite_srcset(match, prefix), text)
         text = _inject_hook(text, prefix)
     elif media == "text/css":
+        text = _CSS_IMPORT.sub(lambda match: _rewrite_import(match, prefix), text)
         text = _CSS_URL.sub(lambda match: _rewrite_css(match, prefix), text)
+    elif media in {
+        "text/javascript",
+        "application/javascript",
+        "application/x-javascript",
+    }:
+        text = _QUOTED_STATIC.sub(lambda match: _rewrite_static(match, prefix), text)
     return text
 
 
@@ -287,6 +347,72 @@ def _rewrite_css(match: re.Match[str], prefix: str) -> str:
     return f"url({quote}{url}{quote})"
 
 
+def _rewrite_import(match: re.Match[str], prefix: str) -> str:
+    """Prefix a root-relative CSS ``@import``."""
+    url = match.group("url")
+    quote = match.group("quote")
+    if url.startswith("/") and not url.startswith("//") and not _already(url, prefix):
+        url = prefix + url
+    return f"@import {quote}{url}{quote}"
+
+
+def _rewrite_srcset(match: re.Match[str], prefix: str) -> str:
+    """Prefix root-relative candidates in an HTML ``srcset``."""
+    parts: list[str] = []
+    for item in match.group("value").split(","):
+        piece = item.strip()
+        if not piece:
+            continue
+        bits = piece.split()
+        url = bits[0]
+        if (
+            url.startswith("/")
+            and not url.startswith("//")
+            and not _already(url, prefix)
+        ):
+            bits[0] = prefix + url
+        parts.append(" ".join(bits))
+    value = ", ".join(parts)
+    return f"{match.group('attr')}{match.group('quote')}{value}{match.group('quote')}"
+
+
+def _rewrite_static(match: re.Match[str], prefix: str) -> str:
+    """Prefix a quoted ``/static/...`` path inside a script."""
+    return f"{match.group('quote')}{prefix}/static/{match.group('rest')}"
+
+
+def _redact(url: str) -> str:
+    """Hide a websocket token before a URL is written to the log."""
+    return _TOKEN_QUERY.sub(r"\1***", url)
+
+
+def _decode_body(body: bytes, encoding: str) -> tuple[bytes, bool]:
+    """Return plain bytes, and whether a content encoding was removed.
+
+    aiohttp usually decodes gzip itself and drops the header. A tablet that
+    gzips anyway, or a client that leaves the header in place, is handled
+    here so the rewrite step never treats compressed bytes as text and the
+    browser is not told to decode a body that is already plain.
+    """
+    enc = encoding.lower().strip()
+    if body.startswith(b"\x1f\x8b"):
+        try:
+            return gzip.decompress(body), True
+        except OSError, EOFError, zlib.error:
+            return body, bool(enc)
+    if enc == "deflate":
+        try:
+            return zlib.decompress(body), True
+        except zlib.error:
+            try:
+                return zlib.decompress(body, -zlib.MAX_WBITS), True
+            except zlib.error:
+                return body, False
+    if enc in {"gzip", "x-gzip"}:
+        return body, True
+    return body, False
+
+
 def _inject_hook(html: str, prefix: str) -> str:
     """Insert ``<base>`` and the rewrite hook as the first thing in ``<head>``."""
     snippet = f'<base href="{prefix}/"><script src="{prefix}/{PROXY_HOOK}"></script>'
@@ -299,101 +425,35 @@ def _inject_hook(html: str, prefix: str) -> str:
 def hook_javascript(prefix: str, origins: tuple[str, str]) -> str:
     """Return the script that rewrites URLs the static pass cannot see.
 
-    Fetch, XHR, websockets, and history run after the document is parsed.
-    The constants are JSON so a tablet name cannot break out of the script.
+    The functions live in ``frontend/shim.mjs`` (shipped next to the built
+    panel) so the Node tests and this response cannot drift apart. Fetch,
+    XHR, websockets, EventSource, forms and location changes run after the
+    document is parsed. The constants are JSON so a tablet name cannot break
+    out of the script.
     """
     http_origin, https_origin = origins
     ws_origins = [
         "ws" + http_origin.removeprefix("http"),
         "wss" + https_origin.removeprefix("https"),
     ]
-    return f"""
-(() => {{
-  const PREFIX = {json.dumps(prefix)};
-  const ORIGINS = {json.dumps([http_origin, https_origin])};
-  const WS_ORIGINS = {json.dumps(ws_origins)};
-  const SOURCE = {json.dumps(PROXY_SOURCE)};
-
-  function boundary(url, origin) {{
-    return url === origin || url.startsWith(origin + "/")
-      || url.startsWith(origin + "?") || url.startsWith(origin + "#");
-  }}
-
-  function rewrite(url) {{
-    if (typeof url !== "string" || !url) return url;
-    for (const origin of ORIGINS) {{
-      if (boundary(url, origin)) return PREFIX + url.slice(origin.length);
-    }}
-    for (const origin of WS_ORIGINS) {{
-      if (boundary(url, origin)) {{
-        const rest = url.slice(origin.length);
-        const page = location.protocol === "https:" ? "wss:" : "ws:";
-        return page + "//" + location.host + PREFIX + rest;
-      }}
-    }}
-    if (url.startsWith("/") && !url.startsWith("//") && url !== PREFIX
-        && !url.startsWith(PREFIX + "/")) {{
-      return PREFIX + url;
-    }}
-    return url;
-  }}
-
-  const origFetch = window.fetch;
-  if (origFetch) {{
-    window.fetch = function (input, init) {{
-      if (typeof input === "string") input = rewrite(input);
-      else if (input && typeof input.url === "string") {{
-        input = new Request(rewrite(input.url), input);
-      }}
-      return origFetch.call(this, input, init);
-    }};
-  }}
-
-  const origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {{
-    return origOpen.call(this, method, rewrite(String(url)), ...rest);
-  }};
-
-  const OrigWS = window.WebSocket;
-  function ProxiedWS(url, protocols) {{
-    const next = rewrite(String(url));
-    if (protocols === undefined) return new OrigWS(next);
-    return new OrigWS(next, protocols);
-  }}
-  ProxiedWS.prototype = OrigWS.prototype;
-  ProxiedWS.CONNECTING = OrigWS.CONNECTING;
-  ProxiedWS.OPEN = OrigWS.OPEN;
-  ProxiedWS.CLOSING = OrigWS.CLOSING;
-  ProxiedWS.CLOSED = OrigWS.CLOSED;
-  window.WebSocket = ProxiedWS;
-
-  if (window.EventSource) {{
-    const OrigES = window.EventSource;
-    window.EventSource = function (url, options) {{
-      return new OrigES(rewrite(String(url)), options);
-    }};
-    window.EventSource.prototype = OrigES.prototype;
-  }}
-
-  const origPush = history.pushState.bind(history);
-  const origReplace = history.replaceState.bind(history);
-  history.pushState = (state, title, url) =>
-    origPush(state, title, typeof url === "string" ? rewrite(url) : url);
-  history.replaceState = (state, title, url) =>
-    origReplace(state, title, typeof url === "string" ? rewrite(url) : url);
-
-  const origAssign = location.assign.bind(location);
-  const origReplaceLoc = location.replace.bind(location);
-  location.assign = (url) => origAssign(rewrite(String(url)));
-  location.replace = (url) => origReplaceLoc(rewrite(String(url)));
-
-  const origOpenWindow = window.open;
-  window.open = (url, target, features) =>
-    origOpenWindow.call(window, url ? rewrite(String(url)) : url, target, features);
-
-  parent.postMessage({{ source: SOURCE, ok: true }}, location.origin);
-}})();
-"""
+    source = _SHIM_PATH.read_text(encoding="utf-8")
+    source = source.replace("export function ", "function ")
+    source = source.replace("export const ", "const ")
+    ctx = {
+        "prefix": prefix,
+        "origins": [http_origin, https_origin],
+        "wsOrigins": ws_origins,
+        "source": PROXY_SOURCE,
+    }
+    return (
+        "(() => {\n"
+        f"  const __KM_CTX__ = {json.dumps(ctx)};\n"
+        "  __KM_CTX__.pageProtocol = location.protocol;\n"
+        "  __KM_CTX__.pageHost = location.host;\n"
+        f"{source}\n"
+        "  installNetworkShim(window, __KM_CTX__);\n"
+        "})();\n"
+    )
 
 
 def _error_page(status: int, title: str, message: str) -> web.Response:
@@ -408,7 +468,17 @@ def _error_page(status: int, title: str, message: str) -> web.Response:
         f"{json.dumps(PROXY_SOURCE)},ok:false}}, location.origin);</script>"
         "</body></html>"
     )
-    return web.Response(status=status, text=body, content_type="text/html")
+    return web.Response(
+        status=status,
+        text=body,
+        content_type="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            # The iframe shim reads this to tell a Home Assistant refusal
+            # from a refusal the tablet sent.
+            "X-Kiosk-Mgmt-Error": "home-assistant",
+        },
+    )
 
 
 def _media_type(header: str | None) -> str:
@@ -593,19 +663,54 @@ def _forward_query(request: web.Request) -> list[tuple[str, str]]:
     ]
 
 
+def _kiosk_authorization(request: web.Request) -> str | None:
+    """Return the tablet credential to send upstream, if there is one.
+
+    ``X-Kiosk-Authorization`` is the shim's copy and always wins. A raw
+    ``Authorization`` is forwarded only when it is not a Home Assistant
+    access token. Home Assistant's middleware does not reject an unknown
+    bearer; it leaves the request unauthenticated and the proxy cookie is
+    what authorized the view. Dropping that header is what made a correct
+    password look like a 401 from the tablet. A bearer the middleware did
+    accept belongs to the administrator and stays here.
+    """
+    moved = request.headers.get(KIOSK_AUTHORIZATION)
+    if moved:
+        return moved.strip()
+    incoming = request.headers.get(AUTHORIZATION)
+    if not incoming:
+        return None
+    if _is_home_assistant_bearer(request, incoming):
+        return None
+    return incoming
+
+
+def _is_home_assistant_bearer(request: web.Request, header: str) -> bool:
+    """True when ``header`` is an access token Home Assistant would accept."""
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return False
+    hass: HomeAssistant = request.app[KEY_HASS]
+    return hass.auth.async_validate_access_token(token.strip()) is not None
+
+
 def _forward_request_headers(
     request: web.Request, upstream_origin: str
 ) -> dict[str, str]:
     """Copy request headers the tablet should see.
 
-    The Home Assistant bearer token and the proxy cookie stay here. Origin
-    and Referer are rewritten so a tablet that checks them still sees its
-    own admin origin.
+    The Home Assistant bearer token and the proxy cookie stay here. The
+    tablet's own token is added back as ``Authorization`` (see
+    ``_kiosk_authorization``). Origin and Referer are rewritten so a tablet
+    that checks them still sees its own admin origin. ``Accept-Encoding`` is
+    left for the HTTP client, which decodes gzip before this proxy rewrites
+    the body.
     """
     headers: dict[str, str] = {}
+    skip = {AUTHORIZATION.lower(), "cookie", KIOSK_AUTHORIZATION.lower()}
     for key, value in request.headers.items():
         lower = key.lower()
-        if lower in _HOP or lower in {AUTHORIZATION.lower(), "cookie"}:
+        if lower in _HOP or lower in skip:
             continue
         if lower == "origin":
             headers[key] = upstream_origin
@@ -617,7 +722,9 @@ def _forward_request_headers(
     cookie = _upstream_cookie(request)
     if cookie:
         headers["Cookie"] = cookie
-    headers["Accept-Encoding"] = "identity"
+    token = _kiosk_authorization(request)
+    if token:
+        headers[AUTHORIZATION] = token
     return headers
 
 
@@ -638,6 +745,8 @@ def _response_headers(
     origins: tuple[str, str],
     cookie: str,
     rewritten: bool,
+    decoded: bool,
+    secure: bool,
 ) -> CIMultiDict[str]:
     """Build the headers the browser should see."""
     headers: CIMultiDict[str] = CIMultiDict()
@@ -646,19 +755,16 @@ def _response_headers(
         if lower in _DROP_RESPONSE:
             continue
         if lower == "set-cookie":
-            headers.add(key, rewrite_set_cookie(value, prefix=prefix))
+            headers.add(key, rewrite_set_cookie(value, prefix=prefix, secure=secure))
             continue
         if lower == LOCATION.lower():
             headers.add(key, rewrite_location(value, prefix=prefix, origins=origins))
             continue
-        if rewritten and lower == CONTENT_LENGTH.lower():
+        if (rewritten or decoded) and lower == CONTENT_LENGTH.lower():
+            continue
+        if decoded and lower == "content-encoding":
             continue
         headers.add(key, value)
-    policy = upstream.headers.get("Content-Security-Policy")
-    if policy:
-        stripped = strip_frame_ancestors(policy)
-        if stripped:
-            headers["Content-Security-Policy"] = stripped
     headers.add("Set-Cookie", cookie)
     return headers
 
@@ -688,23 +794,22 @@ async def _proxy_http(
     origin = origins[1] if scheme == SCHEME_HTTPS else origins[0]
     upstream = _upstream_url(record, path, _forward_query(request))
     timeout = ClientTimeout(total=60, sock_connect=10)
-    data = request.content if request.can_read_body else None
     prefix = proxy_prefix(entry_id, kiosk_id)
     cookie = _cookie(request, user.id, entry_id, kiosk_id)
+    data, headers = await _upstream_body(request, origin)
     try:
         response_cm = session.request(
             request.method,
             upstream,
-            headers=_forward_request_headers(request, origin),
+            headers=headers,
             data=data,
             allow_redirects=False,
             ssl=ssl_param,
             timeout=timeout,
-            skip_auto_headers=["Accept-Encoding"],
         )
         upstream_response = await response_cm.__aenter__()
     except ServerFingerprintMismatch:
-        _LOGGER.warning("Proxy to %s refused a changed certificate", upstream)
+        _LOGGER.warning("Proxy to %s refused a changed certificate", _redact(upstream))
         return _error_page(
             409,
             "Certificate changed",
@@ -712,22 +817,61 @@ async def _proxy_http(
             "Kiosk Mgmt has pinned. Accept the new certificate from the repair.",
         )
     except (ClientError, OSError, TimeoutError) as err:
-        _LOGGER.debug("Proxy to %s failed: %s", upstream, err)
+        _LOGGER.debug(
+            "Proxy upstream error %s %s -> %s: %s",
+            request.method,
+            request.path,
+            _redact(upstream),
+            err,
+        )
         return _error_page(
             502,
             "Tablet didn't answer",
             "Home Assistant could not reach the tablet's admin page.",
         )
     try:
+        _LOGGER.debug(
+            "Proxied %s %s -> %s (%s)",
+            request.method,
+            request.path,
+            _redact(upstream),
+            upstream_response.status,
+        )
         return await _send_upstream(
             request,
             upstream_response,
             prefix=prefix,
             origins=origins,
             cookie=cookie,
+            secure=request.secure,
         )
     finally:
         await response_cm.__aexit__(None, None, None)
+
+
+async def _upstream_body(
+    request: web.Request, upstream_origin: str
+) -> tuple[Any, dict[str, str]]:
+    """Return the body and headers to send to the tablet.
+
+    Login and the other JSON calls are small and are buffered so the tablet
+    sees ``Content-Length``. Its embedded server is not required to accept a
+    chunked body, and a chunked login is what arrives as an empty password.
+    Larger bodies (an APK upload) keep the browser's length and are streamed.
+    """
+    data: Any = None
+    if request.can_read_body:
+        length = request.content_length
+        if length is not None and length <= _MAX_BUFFER:
+            data = await request.read()
+        else:
+            data = request.content
+    headers = _forward_request_headers(request, upstream_origin)
+    if isinstance(data, bytes):
+        headers["Content-Length"] = str(len(data))
+    elif request.content_length is not None:
+        headers["Content-Length"] = str(request.content_length)
+    return data, headers
 
 
 async def _send_upstream(
@@ -737,19 +881,25 @@ async def _send_upstream(
     prefix: str,
     origins: tuple[str, str],
     cookie: str,
+    secure: bool,
 ) -> web.StreamResponse:
     """Write the upstream response, buffering text that has to be rewritten."""
     media = _media_type(upstream.headers.get(CONTENT_TYPE))
     length = upstream.content_length
     rewrite = media in _REWRITABLE and (length is None or length <= _MAX_REWRITE)
     if rewrite:
-        body = await upstream.read()
+        raw = await upstream.read()
+        body, decoded = _decode_body(
+            raw, upstream.headers.get("Content-Encoding") or ""
+        )
         headers = _response_headers(
             upstream,
             prefix=prefix,
             origins=origins,
             cookie=cookie,
             rewritten=True,
+            decoded=decoded,
+            secure=secure,
         )
         if len(body) <= _MAX_REWRITE:
             text = body.decode("utf-8", errors="replace")
@@ -767,6 +917,8 @@ async def _send_upstream(
         origins=origins,
         cookie=cookie,
         rewritten=False,
+        decoded=False,
+        secure=secure,
     )
     stream = web.StreamResponse(status=upstream.status, headers=headers)
     await stream.prepare(request)
@@ -847,9 +999,19 @@ async def _proxy_websocket(
             timeout=ClientWSTimeout(ws_close=10),
         )
     except (ClientError, OSError, TimeoutError) as err:
-        _LOGGER.debug("Websocket proxy to %s failed: %s", upstream_url, err)
+        _LOGGER.debug(
+            "Proxy upstream error websocket %s -> %s: %s",
+            request.path,
+            _redact(upstream_url),
+            err,
+        )
         await client.close(code=1011, message=b"upstream unavailable")
         return client
+    _LOGGER.debug(
+        "Proxied websocket %s -> %s",
+        request.path,
+        _redact(upstream_url),
+    )
 
     async def _from_browser() -> None:
         async for msg in client:
