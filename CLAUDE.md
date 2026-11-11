@@ -13,6 +13,9 @@ anything.
   - `config_flow.py`: the single config entry, zeroconf confirm, manual host,
     options, and reconfigure.
   - `client.py`: probes `GET /api/health` on the admin port.
+  - `tls.py`: leaf SHA-256 pinning and the aiohttp fingerprint check.
+  - `proxy.py`: admin-only reverse proxy used by the sidebar iframe.
+  - `repairs.py`: accept a changed certificate from the repair.
   - `discovery.py`: zeroconf and device-registry matching.
   - `coordinator.py`: polling, device registry, repairs.
   - `binary_sensor.py` and `sensor.py`: connectivity and last seen.
@@ -72,13 +75,24 @@ MAC to that record. Ignored kiosks stay in options so discovery does not
 add them back.
 
 Scheme `auto` tries HTTPS, then HTTP, and remembers which one answered.
-`verify_ssl` defaults off because the app's certificate is self-signed.
-Probes use `async_get_clientsession(hass, verify_ssl=False)` unless the
-kiosk is HTTPS and verify is on.
+`verify_ssl` off (the default) pins the leaf certificate: the first
+successful HTTPS handshake records its SHA-256, and later connections check
+that fingerprint with aiohttp's `Fingerprint` instead of a certificate
+authority. The config flow shows the fingerprint before storing it.
+`verify_ssl` on uses Home Assistant's verifying session, for a certificate
+an authority already signed. A stored pin that no longer matches raises a
+repair and does not update the pin until the user accepts the new
+certificate. Entries from 1.1 (`verify_ssl` false, no fingerprint) are
+migrated to 1.2 and pinned on the next successful probe.
 
-The panel embeds the admin page. On an HTTPS Home Assistant page a plain
-HTTP kiosk is not embedded (mixed content). An HTTPS kiosk whose frame
-does not load shows a trust-certificate card.
+The panel does not embed the tablet directly. The iframe loads
+`/api/kiosk_mgmt/proxy/{entry_id}/{kiosk_id}/` with a short-lived signed
+path (`async_sign_path`). That response sets an HttpOnly cookie so the
+embedded app's later requests, including POST and websockets, are
+authorized. The proxy uses the pinned connection, rewrites redirects and
+absolute URLs onto the prefix, and strips `X-Frame-Options` and CSP
+`frame-ancestors`. If the frame does not load, the tab shows a message, a
+retry, and a direct link to the tablet. Open in new tab uses the proxy too.
 
 No secrets are stored. Entity state is connectivity and last seen.
 

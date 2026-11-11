@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import probatio
 
@@ -26,6 +27,7 @@ from .const import (
 from .coordinator import KioskCoordinator, async_link_esphome_devices
 from .discovery import async_watch_mdns
 from .panel import async_register_panel, async_unregister_panel
+from .proxy import register_proxy
 from .records import kiosks_from_options, without
 from .websocket_api import async_register_websocket
 
@@ -48,8 +50,44 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         await async_setup_component(hass, "http", {})
     async_register_websocket(hass)
+    register_proxy(hass)
     await async_register_panel(hass, static=True, panel=False)
     _async_register_services(hass)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Move verify_ssl false onto certificate pinning.
+
+    Version 1.1 stored ``verify_ssl: false`` as "do not check the
+    certificate". 1.2 keeps that flag as "pin the certificate" and leaves
+    ``cert_sha256`` empty so the next successful HTTPS probe records the
+    leaf. ``verify_ssl: true`` stays a certificate-authority check.
+    """
+    if config_entry.version > 1:
+        return False
+    if config_entry.minor_version >= 2:
+        return True
+    options = dict(config_entry.options)
+    raw = options.get("kiosks")
+    kiosks: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        for kiosk_id, record in raw.items():
+            if not isinstance(record, dict):
+                continue
+            updated = dict(record)
+            updated.setdefault("cert_sha256", None)
+            kiosks[str(kiosk_id)] = updated
+    options["kiosks"] = kiosks
+    hass.config_entries.async_update_entry(
+        config_entry,
+        options=options,
+        minor_version=2,
+        version=1,
+    )
+    _LOGGER.debug(
+        "Migrated Kiosk Mgmt entry %s to certificate pinning", config_entry.entry_id
+    )
     return True
 
 

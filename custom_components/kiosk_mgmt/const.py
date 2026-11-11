@@ -52,10 +52,26 @@ HEALTH_PATH: Final = "/api/health"
 # Short, so a dark tablet does not stall the coordinator.
 PROBE_TIMEOUT: Final = 5.0
 UPDATE_INTERVAL: Final = timedelta(seconds=30)
-# The browser cannot tell a refused certificate from a slow tablet. Eight
-# seconds is long enough for a cold WebView and short enough to offer the
-# trust card instead of a blank frame.
+# The panel waits this long for the proxied admin page to report that it
+# loaded. A certificate or connection failure answers sooner via postMessage.
 FRAME_LOAD_TIMEOUT_MS: Final = 8000
+
+# Trust-on-first-use pin of the tablet's leaf certificate. Stored as
+# lowercase hex, no colons. ``verify_ssl`` true means a public authority
+# instead of this pin.
+ATTR_CERT_SHA256: Final = "cert_sha256"
+
+# How long a signed proxy URL and its session cookie stay valid. The panel
+# refreshes both before they expire. Short on purpose: the URL is enough to
+# open the tablet's admin page.
+SIGNED_PATH_SECONDS: Final = 300
+
+# Iframe subresources cannot send the Home Assistant bearer token. The proxy
+# sets this cookie after a signed or bearer request from an admin.
+PROXY_COOKIE: Final = "kiosk_mgmt_proxy"
+
+# Served by the proxy itself, not fetched from the tablet.
+PROXY_HOOK: Final = "__kiosk_mgmt__/hook.js"
 
 SCHEME_AUTO: Final = "auto"
 SCHEME_HTTP: Final = "http"
@@ -65,6 +81,9 @@ SCHEMES: Final = (SCHEME_AUTO, SCHEME_HTTP, SCHEME_HTTPS)
 CONF_SCHEME: Final = "scheme"
 CONF_VERIFY_SSL: Final = "verify_ssl"
 CONF_KIOSK_ID: Final = "kiosk_id"
+
+# Websocket command the panel uses to mint a signed proxy URL.
+WS_SIGN_PROXY: Final = "kiosk_mgmt/sign_proxy"
 
 # options["kiosks"] is a dict of these records, keyed by stable id.
 ATTR_FLEET_ID: Final = "fleet_id"

@@ -1,27 +1,27 @@
 /**
  * How the sidebar panel decides what to show for one kiosk.
  *
- * An HTTPS Home Assistant page cannot embed a plain HTTP admin page
- * (mixed content). An HTTPS admin page whose frame never loads is treated
- * as an untrusted certificate: the browser does not report that failure
- * to the parent page, so a timeout stands in for it.
+ * The admin page is loaded through Home Assistant's proxy, so the browser
+ * talks to Home Assistant and never has to trust the tablet's certificate
+ * or mix a plain HTTP tablet into an HTTPS Home Assistant page. A missing
+ * proxy URL, or a frame that reports failure, is the in-panel message
+ * instead of a blank iframe.
  */
 
 /**
- * @param {string} pageProtocol `location.protocol`, such as "https:".
- * @param {{ scheme?: string }} kiosk
+ * @param {string | null | undefined} proxyUrl signed proxy URL
  * @param {"pending" | "loaded" | "failed"} frameState
- * @returns {"mixed" | "trust" | "iframe"}
+ * @returns {"iframe" | "error"}
  */
-export function frameMode(pageProtocol, kiosk, frameState) {
-  if (pageProtocol === "https:" && kiosk.scheme === "http") {
-    return "mixed";
-  }
-  if (kiosk.scheme === "https" && frameState === "failed") {
-    return "trust";
+export function frameMode(proxyUrl, frameState) {
+  if (!proxyUrl || frameState === "failed") {
+    return "error";
   }
   return "iframe";
 }
 
-/** How long to wait for an HTTPS frame before offering the trust card. */
+/** How long to wait for the proxied page before showing the retry card. */
 export const FRAME_LOAD_TIMEOUT_MS = 8000;
+
+/** postMessage source the proxy hook and error page both use. */
+export const PROXY_SOURCE = "kiosk-mgmt-proxy";

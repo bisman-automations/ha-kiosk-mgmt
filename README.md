@@ -42,10 +42,21 @@ first time it starts on 2026.11.
 
 [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bisman-automations&repository=ha-kiosk-mgmt&category=integration)
 
-Kiosk Mgmt does not appear in search until it is in the default catalog. Add it as a custom repository:
+Kiosk Mgmt does not appear in search until it is in the default catalog. Add it as a custom repository, then download it:
 
 1. In HACS open the menu, choose **Custom repositories**, and add `https://github.com/bisman-automations/ha-kiosk-mgmt` as an **Integration**.
 2. Download **Kiosk Mgmt** and restart Home Assistant.
+
+### Custom repository
+
+Kiosk Mgmt is not in the default catalog yet. The repository to add, in the
+Marketplace or in HACS, is:
+
+`https://github.com/bisman-automations/ha-kiosk-mgmt`
+
+Add that as an integration repository, then install **Kiosk Mgmt** from the
+list. The Marketplace button and the HACS button above open the same
+repository.
 
 ### Manual
 
@@ -67,9 +78,16 @@ If a tablet is not discovered, open the integration's options and choose
 **Add a kiosk**. Type the tablet's address. Leave **Protocol** on
 **Detect automatically** unless you know it: that tries HTTPS first, then
 HTTP, on port 2324 (or whatever you set under Remote Administration). Leave
-**Verify SSL certificate** off when the tablet uses the certificate Kiosk
-Satellite creates for itself. Turn it on only for a certificate Home
-Assistant already trusts.
+**Verify SSL certificate** off for the certificate Kiosk Satellite creates
+for itself. Kiosk Mgmt shows that certificate's SHA-256 fingerprint and
+remembers it. Later connections are allowed only when the tablet presents
+the same certificate. Turn **Verify SSL certificate** on only for a
+certificate signed by an authority Home Assistant already trusts.
+
+If the tablet's certificate changes, for example after reinstalling Kiosk
+Satellite, Home Assistant raises a repair named for the tablet. Open the
+repair, compare the new fingerprint, and accept it only if you expected the
+change. Reconfiguring the tablet offers the same choice.
 
 ### Sidebar
 
@@ -77,16 +95,15 @@ Assistant already trusts.
 with its name, IP address, model, whether it is online, and when it was last
 seen, plus **Open in new tab**.
 
-The admin page is embedded in the tab when the browser allows it. Two cases
-are not embedded:
+The admin page is loaded through Home Assistant, not straight from the
+tablet. That is what lets the tab show a self-signed certificate, and a
+plain HTTP tablet, while Home Assistant itself is open over HTTPS. Only an
+administrator can open the proxied page. **Open in new tab** uses the same
+proxied address.
 
-- Home Assistant is open over HTTPS and the tablet's admin page is plain
-  HTTP. Browsers block that mix. The tab shows the details and the link
-  instead of a blank frame.
-- The tablet's admin page is HTTPS and this browser does not trust its
-  certificate yet. The tab waits a few seconds, then shows **Trust
-  certificate**. Open the page in a new tab, accept the certificate once,
-  and choose **Retry**.
+If the page does not load, the tab says so instead of leaving a blank area.
+**Retry** asks again. **Open tablet directly** is the tablet's own address,
+which may ask the browser to trust the certificate.
 
 ### Entities
 
@@ -106,12 +123,17 @@ it back. **Remove** forgets it, so a later discovery can add it again.
   set a password. **Find other kiosks** is what announces the tablet to other
   Kiosk Satellite apps. With that off, the tablet can still be found from its
   ESPHome advertisement, or you can add it by address.
-- **The embedded page is blank.** If Home Assistant is HTTPS and the tablet
-  is HTTP, use **Open in new tab**. If the tablet is HTTPS, use **Trust
-  certificate**, accept the certificate in the new tab, then **Retry**.
-- **Certificate repair.** A repair named for the tablet means verification is
-  on and the certificate was rejected. Turn **Verify SSL certificate** off
-  for that tablet, or install a certificate Home Assistant trusts.
+- **The tab says it can't load the admin page.** Choose **Retry**. If that
+  still fails, use **Open tablet directly**. A certificate warning in that
+  tab is the browser's own check; Kiosk Mgmt's pin is separate.
+- **Certificate changed.** A repair named for the tablet means the
+  certificate no longer matches the one Kiosk Mgmt pinned. Accept the new
+  fingerprint from the repair, or from the tablet's reconfigure screen, only
+  if you expected it to change.
+- **Certificate is not trusted.** A repair with that wording means **Verify
+  SSL certificate** is on and the certificate is not signed by an authority
+  Home Assistant trusts. Leave **Verify SSL certificate** off to pin the
+  tablet's own certificate, or install a certificate Home Assistant trusts.
 - **Diagnostics:** on the integration's page, open the menu and choose
   **Download diagnostics**. Attach the file to an issue (check it first for
   anything you'd rather not share).

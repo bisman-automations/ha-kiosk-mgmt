@@ -19,6 +19,7 @@ from .client import ProbeResult, admin_url
 from .const import (
     ATTR_APP_VERSION,
     ATTR_BRAND,
+    ATTR_CERT_SHA256,
     ATTR_FLEET_ID,
     ATTR_IGNORED,
     ATTR_LINK_URL,
@@ -33,6 +34,7 @@ from .const import (
     SCHEME_HTTP,
 )
 from .discovery import Candidate
+from .tls import normalize_fingerprint
 
 RECORD_KEYS = (
     "name",
@@ -41,6 +43,7 @@ RECORD_KEYS = (
     CONF_SCHEME,
     ATTR_SCHEME_MODE,
     CONF_VERIFY_SSL,
+    ATTR_CERT_SHA256,
     "model",
     ATTR_BRAND,
     ATTR_MAC,
@@ -78,6 +81,12 @@ def _clean(record: Mapping[str, Any]) -> dict[str, Any]:
     cleaned[ATTR_SCHEME_MODE] = cleaned[ATTR_SCHEME_MODE] or SCHEME_AUTO
     cleaned[CONF_VERIFY_SSL] = bool(cleaned[CONF_VERIFY_SSL])
     cleaned[ATTR_IGNORED] = bool(cleaned[ATTR_IGNORED])
+    # None until the next HTTPS handshake records the leaf. A CA-checked
+    # kiosk keeps this empty on purpose.
+    if cleaned[CONF_VERIFY_SSL]:
+        cleaned[ATTR_CERT_SHA256] = None
+    else:
+        cleaned[ATTR_CERT_SHA256] = normalize_fingerprint(cleaned.get(ATTR_CERT_SHA256))
     cleaned["name"] = cleaned["name"] or cleaned["host"]
     return cleaned
 
@@ -125,6 +134,7 @@ def apply_candidate(
     verify_ssl: bool = False,
     scheme_mode: str | None = None,
     kiosk_id: str | None = None,
+    cert_sha256: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return records with this candidate merged in.
 
@@ -162,6 +172,15 @@ def apply_candidate(
     record[CONF_VERIFY_SSL] = (
         verify_ssl if scheme_mode is not None else record[CONF_VERIFY_SSL]
     )
+    # scheme_mode is set when the user edited the connection. That is the
+    # moment a new pin replaces the stored one. Discovery leaves a pin that
+    # was already accepted alone, and fills it in when the record has none.
+    if record[CONF_VERIFY_SSL]:
+        record[ATTR_CERT_SHA256] = None
+    elif cert_sha256:
+        record[ATTR_CERT_SHA256] = normalize_fingerprint(cert_sha256)
+    elif probe.cert_sha256 and not record.get(ATTR_CERT_SHA256):
+        record[ATTR_CERT_SHA256] = normalize_fingerprint(probe.cert_sha256)
     record["name"] = probe.name or candidate.name or record["name"]
     if probe.model:
         record["model"] = probe.model

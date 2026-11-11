@@ -37,12 +37,21 @@ def probe_ok(scheme: str = "http", **overrides: Any) -> ProbeResult:
         brand=overrides.get("brand", HEALTH["brand"]),
         app_version=overrides.get("app_version", HEALTH["appVersion"]),
         ip=overrides.get("ip", HOST),
+        cert_sha256=overrides.get("cert_sha256"),
+        cert_mismatch=bool(overrides.get("cert_mismatch", False)),
     )
 
 
-def probe_fail(*, ssl_error: bool = False) -> ProbeResult:
+def probe_fail(
+    *, ssl_error: bool = False, cert_sha256: str | None = None
+) -> ProbeResult:
     """Return a failed probe."""
-    return ProbeResult(ok=False, scheme=None, ssl_error=ssl_error)
+    return ProbeResult(
+        ok=False,
+        scheme=None,
+        ssl_error=ssl_error,
+        cert_sha256=cert_sha256,
+    )
 
 
 def fleet_service(**properties: str) -> ZeroconfServiceInfo:

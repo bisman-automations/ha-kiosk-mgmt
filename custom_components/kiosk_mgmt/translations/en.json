@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add a Kiosk Satellite",
-        "description": "Type the tablet's address. Kiosk Mgmt tries HTTPS and then HTTP on the admin port unless you choose one. Leave certificate checking off for the self-signed certificate Kiosk Satellite creates.",
+        "description": "Type the tablet's address. Kiosk Mgmt tries HTTPS and then HTTP on the admin port unless you choose one. Leave Verify SSL certificate off to pin the tablet's own certificate. {fingerprint}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -14,12 +14,20 @@
           "host": "IP address or host name, with no http:// prefix.",
           "port": "Remote Administration port. 2324 unless you changed it on the tablet.",
           "scheme": "Detect automatically tries HTTPS first, then HTTP.",
-          "verify_ssl": "Off trusts the tablet's own certificate. On requires a certificate this Home Assistant already trusts."
+          "verify_ssl": "Off pins the tablet's certificate the first time it connects and checks that fingerprint after that. On requires a certificate signed by an authority this Home Assistant already trusts."
         }
       },
       "confirm": {
         "title": "Set up Kiosk Mgmt",
-        "description": "Found {name} at {host} ({model}). Kiosk Mgmt will keep looking for other Kiosk Satellite tablets on this network."
+        "description": "Found {name} at {host} ({model}). Kiosk Mgmt will keep looking for other Kiosk Satellite tablets on this network. {fingerprint}"
+      },
+      "pin_certificate": {
+        "title": "Pin this certificate",
+        "description": "{name} at {host} uses HTTPS with a certificate this Home Assistant does not already trust. Kiosk Satellite creates that certificate itself unless you imported one. Kiosk Mgmt will remember the fingerprint below and connect only when the tablet presents it again.\n\nSHA-256: {fingerprint}"
+      },
+      "accept_certificate": {
+        "title": "Accept the new certificate",
+        "description": "{name} at {host} presented a different certificate from the one Kiosk Mgmt has pinned. Accept it only if you expected the tablet's certificate to change, for example after reinstalling Kiosk Satellite.\n\nStored SHA-256: {old_fingerprint}\n\nNew SHA-256: {fingerprint}"
       },
       "reconfigure": {
         "title": "Choose a kiosk",
@@ -30,7 +38,7 @@
       },
       "reconfigure_connection": {
         "title": "Update {name}",
-        "description": "Protocol, port, and certificate checking for this tablet.",
+        "description": "Protocol, port, and certificate checking for this tablet. {fingerprint}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -39,14 +47,14 @@
         },
         "data_description": {
           "scheme": "Detect automatically tries HTTPS first, then HTTP.",
-          "verify_ssl": "Off trusts the tablet's own certificate."
+          "verify_ssl": "Off pins the tablet's certificate. On requires a certificate signed by an authority this Home Assistant already trusts."
         }
       }
     },
     "error": {
       "cannot_connect": "Can't reach a Kiosk Satellite admin page at that address. Remote Administration has to be on, with a password set.",
       "invalid_host": "Enter a host name or IP address and a port from 1 to 65535.",
-      "ssl_error": "The tablet answered on HTTPS, but the certificate check failed. Turn off Verify SSL certificate for a self-signed certificate.",
+      "ssl_error": "The tablet answered on HTTPS, but that certificate is not signed by a trusted authority. Leave Verify SSL certificate off to pin it instead.",
       "already_tracked": "That tablet is already in Kiosk Mgmt."
     },
     "abort": {
@@ -69,7 +77,7 @@
       },
       "add": {
         "title": "Add a kiosk",
-        "description": "Type the tablet's address. Detection tries HTTPS first, then HTTP.",
+        "description": "Type the tablet's address. Detection tries HTTPS first, then HTTP. Leave Verify SSL certificate off to pin the tablet's own certificate. {fingerprint}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -80,8 +88,16 @@
           "host": "IP address or host name, with no http:// prefix.",
           "port": "Remote Administration port. 2324 unless you changed it on the tablet.",
           "scheme": "Detect automatically tries HTTPS first, then HTTP.",
-          "verify_ssl": "Off trusts the tablet's own certificate. On requires a certificate this Home Assistant already trusts."
+          "verify_ssl": "Off pins the tablet's certificate the first time it connects and checks that fingerprint after that. On requires a certificate signed by an authority this Home Assistant already trusts."
         }
+      },
+      "pin_certificate": {
+        "title": "Pin this certificate",
+        "description": "{name} at {host} uses HTTPS with a certificate this Home Assistant does not already trust. Kiosk Satellite creates that certificate itself unless you imported one. Kiosk Mgmt will remember the fingerprint below and connect only when the tablet presents it again.\n\nSHA-256: {fingerprint}"
+      },
+      "accept_certificate": {
+        "title": "Accept the new certificate",
+        "description": "{name} at {host} presented a different certificate from the one Kiosk Mgmt has pinned. Accept it only if you expected the tablet's certificate to change, for example after reinstalling Kiosk Satellite.\n\nStored SHA-256: {old_fingerprint}\n\nNew SHA-256: {fingerprint}"
       },
       "manage": {
         "title": "Manage kiosks",
@@ -101,6 +117,7 @@
       },
       "edit": {
         "title": "Update {name}",
+        "description": "Protocol, port, and certificate checking for {name}. {fingerprint}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -109,7 +126,7 @@
         },
         "data_description": {
           "scheme": "Detect automatically tries HTTPS first, then HTTP.",
-          "verify_ssl": "Off trusts the tablet's own certificate."
+          "verify_ssl": "Off pins the tablet's certificate. On requires a certificate signed by an authority this Home Assistant already trusts."
         }
       },
       "ignore": {
@@ -128,7 +145,7 @@
     "error": {
       "cannot_connect": "Can't reach a Kiosk Satellite admin page at that address. Remote Administration has to be on, with a password set.",
       "invalid_host": "Enter a host name or IP address and a port from 1 to 65535.",
-      "ssl_error": "The tablet answered on HTTPS, but the certificate check failed. Turn off Verify SSL certificate for a self-signed certificate.",
+      "ssl_error": "The tablet answered on HTTPS, but that certificate is not signed by a trusted authority. Leave Verify SSL certificate off to pin it instead.",
       "already_tracked": "That tablet is already in Kiosk Mgmt."
     },
     "abort": {
@@ -151,7 +168,21 @@
     },
     "certificate": {
       "title": "{name} certificate is not trusted",
-      "description": "The certificate for {name} at {host} failed verification. Kiosk Satellite uses a self-signed certificate unless you imported one. Turn off Verify SSL certificate for this kiosk, or give it a certificate this Home Assistant trusts."
+      "description": "The certificate for {name} at {host} is not signed by an authority this Home Assistant trusts. Leave Verify SSL certificate off for this kiosk to pin the tablet's own certificate, or give it a certificate Home Assistant already trusts."
+    },
+    "certificate_changed": {
+      "title": "{name} certificate changed",
+      "fix_flow": {
+        "abort": {
+          "cannot_connect": "Can't reach the tablet to confirm the new certificate. Check that it is on, then try again."
+        },
+        "step": {
+          "init": {
+            "title": "Accept the new certificate for {name}",
+            "description": "{name} at {host} presented a different certificate from the one Kiosk Mgmt has pinned. Accept it only if you expected the tablet's certificate to change.\n\nStored SHA-256: {fingerprint}\n\nNew SHA-256: {new_fingerprint}"
+          }
+        }
+      }
     }
   },
   "entity": {

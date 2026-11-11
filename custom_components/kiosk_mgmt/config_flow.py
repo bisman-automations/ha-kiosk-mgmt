@@ -9,6 +9,7 @@ is the user step before the entry exists, and an options step after it does.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import logging
 from typing import Any
 
@@ -35,18 +36,21 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from .client import async_probe
+from .client import ProbeResult, async_probe
 from .const import (
+    ATTR_CERT_SHA256,
     CONF_KIOSK_ID,
     CONF_SCHEME,
     CONF_VERIFY_SSL,
     DEFAULT_PORT,
     DOMAIN,
     SCHEME_AUTO,
+    SCHEME_HTTPS,
     SCHEMES,
 )
 from .discovery import Candidate, parse_zeroconf
 from .records import apply_candidate, kiosks_from_options, without
+from .tls import format_fingerprint, normalize_fingerprint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -122,16 +126,204 @@ def _kiosk_options(records: Mapping[str, Mapping[str, Any]]) -> list[SelectOptio
     return options
 
 
-class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
+@dataclass
+class _Pending:
+    """A connection the user has not finished accepting."""
+
+    cleaned: dict[str, Any]
+    probe: ProbeResult
+    fingerprint: str
+    old_fingerprint: str | None
+    kiosk_id: str | None
+    base: dict[str, dict[str, Any]]
+    source: str
+    preserved: Mapping[str, Any]
+
+
+def _note(fingerprint: str | None) -> str:
+    """Return the sentence appended to a connection form, or empty."""
+    normalized = normalize_fingerprint(fingerprint)
+    if normalized is None:
+        return ""
+    return (
+        f"SHA-256: {format_fingerprint(normalized)}. "
+        "Leave Verify SSL certificate off to pin this certificate."
+    )
+
+
+def _classify(
+    cleaned: Mapping[str, Any],
+    probe: ProbeResult,
+    stored: str | None,
+) -> str:
+    """Return pin, accept, save, ssl_error, or cannot_connect."""
+    presented = normalize_fingerprint(probe.cert_sha256)
+    if probe.cert_mismatch and presented:
+        return "accept"
+    if not probe.ok:
+        return "ssl_error" if probe.ssl_error else "cannot_connect"
+    if cleaned.get(CONF_VERIFY_SSL):
+        return "save"
+    previous = normalize_fingerprint(stored)
+    if presented and presented != previous:
+        return "pin" if previous is None else "accept"
+    return "save"
+
+
+def _records_for(
+    cleaned: Mapping[str, Any],
+    probe: ProbeResult,
+    base: Mapping[str, Mapping[str, Any]],
+    *,
+    kiosk_id: str | None,
+    source: str,
+    preserved: Mapping[str, Any],
+    fingerprint: str | None,
+) -> dict[str, dict[str, Any]]:
+    """Merge a probed connection, including a fingerprint the user accepted."""
+    accepted = probe
+    if not probe.ok:
+        accepted = ProbeResult(
+            ok=True,
+            scheme=probe.scheme or SCHEME_HTTPS,
+            ssl_error=False,
+            cert_sha256=fingerprint,
+            name=probe.name or _text(preserved.get("name")),
+            model=probe.model or _text(preserved.get("model")),
+            brand=probe.brand or _text(preserved.get("brand")),
+            app_version=probe.app_version or _text(preserved.get("app_version")),
+            ip=probe.ip,
+        )
+    candidate = Candidate(
+        host=str(cleaned[CONF_HOST]),
+        port=int(cleaned[CONF_PORT]),
+        scheme_mode=str(cleaned[CONF_SCHEME]),
+        name=accepted.name or _text(preserved.get("name")),
+        mac=_text(preserved.get("mac")),
+        fleet_id=_text(preserved.get("fleet_id")),
+        node_name=_text(preserved.get("node_name")),
+        link_url=_text(preserved.get("link_url")),
+        source=source,
+    )
+    return apply_candidate(
+        base,
+        candidate,
+        accepted,
+        verify_ssl=bool(cleaned.get(CONF_VERIFY_SSL)),
+        scheme_mode=str(cleaned[CONF_SCHEME]),
+        kiosk_id=kiosk_id,
+        cert_sha256=None if cleaned.get(CONF_VERIFY_SSL) else fingerprint,
+    )
+
+
+def _text(value: Any) -> str | None:
+    """Return a stripped string, or None."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+class _CertificateSteps:
+    """Pin and accept steps shared by the config flow and the options flow."""
+
+    _pending: _Pending | None
+    _seen_fingerprint: str | None
+    _last_probe: ProbeResult
+
+    async def _async_offer(
+        self,
+        cleaned: dict[str, Any],
+        base: dict[str, dict[str, Any]],
+        *,
+        kiosk_id: str | None,
+        source: str,
+        preserved: Mapping[str, Any],
+        stored: str | None,
+    ) -> ConfigFlowResult | str | None:
+        """Probe and either return a form, an error key, or None to save now."""
+        probe = await async_probe(
+            self.hass,
+            cleaned[CONF_HOST],
+            cleaned[CONF_PORT],
+            cleaned[CONF_SCHEME],
+            cleaned[CONF_VERIFY_SSL],
+            pinned_sha256=None if cleaned[CONF_VERIFY_SSL] else stored,
+        )
+        self._last_probe = probe
+        action = _classify(cleaned, probe, stored)
+        if action in ("ssl_error", "cannot_connect"):
+            self._seen_fingerprint = probe.cert_sha256
+            return action
+        if action in ("pin", "accept"):
+            fingerprint = normalize_fingerprint(probe.cert_sha256) or ""
+            self._pending = _Pending(
+                cleaned=cleaned,
+                probe=probe,
+                fingerprint=fingerprint,
+                old_fingerprint=normalize_fingerprint(stored),
+                kiosk_id=kiosk_id,
+                base=base,
+                source=source,
+                preserved=preserved,
+            )
+            if action == "pin":
+                return await self.async_step_pin_certificate()
+            return await self.async_step_accept_certificate()
+        return None
+
+    async def async_step_pin_certificate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the leaf fingerprint and store it when the user submits."""
+        return await self._async_certificate_form("pin_certificate", user_input)
+
+    async def async_step_accept_certificate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the old and new fingerprints and replace the pin on submit."""
+        return await self._async_certificate_form("accept_certificate", user_input)
+
+    async def _async_certificate_form(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Render one certificate step."""
+        pending = self._pending
+        if pending is None:
+            return self.async_abort(reason="cannot_connect")
+        if user_input is not None:
+            return await self._apply_pending(pending)
+        name = pending.probe.name or _text(pending.preserved.get("name"))
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=probatio.Schema({}),
+            description_placeholders={
+                "name": name or str(pending.cleaned[CONF_HOST]),
+                "host": str(pending.cleaned[CONF_HOST]),
+                "fingerprint": format_fingerprint(pending.fingerprint),
+                "old_fingerprint": format_fingerprint(pending.old_fingerprint)
+                if pending.old_fingerprint
+                else "",
+            },
+        )
+
+    async def _apply_pending(self, pending: _Pending) -> ConfigFlowResult:
+        """Store the accepted connection. Subclasses decide how the entry updates."""
+        raise NotImplementedError
+
+
+class KioskMgmtConfigFlow(_CertificateSteps, ConfigFlow, domain=DOMAIN):
     """Set up the one Kiosk Mgmt entry."""
 
     VERSION = 1
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Remember the advertisement waiting for confirmation."""
         self._candidate: Candidate | None = None
         self._reconfigure_id: str | None = None
+        self._pending = None
+        self._seen_fingerprint = None
+        self._last_probe = ProbeResult(ok=False, scheme=None, ssl_error=False)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -172,6 +364,7 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
         if not probe.ok:
             return self.async_abort(reason="cannot_connect")
         self._candidate = candidate
+        self._seen_fingerprint = probe.cert_sha256
         self.context["title_placeholders"] = {
             "name": probe.name or candidate.name or candidate.host
         }
@@ -181,6 +374,7 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
                 "name": probe.name or candidate.name or candidate.host,
                 "host": candidate.host,
                 "model": probe.model or "unknown",
+                "fingerprint": _note(probe.cert_sha256),
             },
         )
 
@@ -192,7 +386,15 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
         if candidate is None:
             return self.async_abort(reason="cannot_connect")
         if user_input is None:
-            return self.async_show_form(step_id="confirm")
+            return self.async_show_form(
+                step_id="confirm",
+                description_placeholders={
+                    "name": candidate.name or candidate.host,
+                    "host": candidate.host,
+                    "model": "unknown",
+                    "fingerprint": _note(self._seen_fingerprint),
+                },
+            )
         probe = await async_probe(
             self.hass,
             candidate.host,
@@ -202,7 +404,13 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         if not probe.ok:
             return self.async_abort(reason="cannot_connect")
-        records = apply_candidate({}, candidate, probe, verify_ssl=False)
+        records = apply_candidate(
+            {},
+            candidate,
+            probe,
+            verify_ssl=False,
+            cert_sha256=probe.cert_sha256,
+        )
         return self.async_create_entry(
             title="Kiosk Mgmt",
             data={},
@@ -253,41 +461,33 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
             if isinstance(cleaned, str):
                 errors["base"] = cleaned
             else:
-                probe = await async_probe(
-                    self.hass,
-                    cleaned[CONF_HOST],
-                    cleaned[CONF_PORT],
-                    cleaned[CONF_SCHEME],
-                    cleaned[CONF_VERIFY_SSL],
+                outcome = await self._async_offer(
+                    cleaned,
+                    records,
+                    kiosk_id=kiosk_id,
+                    source="reconfigure",
+                    preserved=record,
+                    stored=record.get(ATTR_CERT_SHA256),
                 )
-                if not probe.ok:
-                    errors["base"] = (
-                        "ssl_error" if probe.ssl_error else "cannot_connect"
-                    )
-                else:
-                    candidate = Candidate(
-                        host=cleaned[CONF_HOST],
-                        port=cleaned[CONF_PORT],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        name=record.get("name"),
-                        mac=record.get("mac"),
-                        fleet_id=record.get("fleet_id"),
-                        node_name=record.get("node_name"),
-                        link_url=record.get("link_url"),
-                        source="reconfigure",
-                    )
-                    updated = apply_candidate(
-                        records,
-                        candidate,
-                        probe,
-                        verify_ssl=cleaned[CONF_VERIFY_SSL],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        kiosk_id=kiosk_id,
-                    )
-                    return self.async_update_reload_and_abort(
-                        entry,
-                        options={"kiosks": updated},
-                    )
+                if isinstance(outcome, str):
+                    errors["base"] = outcome
+                elif outcome is not None:
+                    return outcome
+                updated = _records_for(
+                    cleaned,
+                    self._last_probe,
+                    records,
+                    kiosk_id=kiosk_id,
+                    source="reconfigure",
+                    preserved=record,
+                    fingerprint=None
+                    if cleaned[CONF_VERIFY_SSL]
+                    else self._last_probe.cert_sha256,
+                )
+                return self.async_update_reload_and_abort(
+                    entry,
+                    options={"kiosks": updated},
+                )
         defaults = {
             CONF_HOST: record.get("host", ""),
             CONF_PORT: record.get("port", DEFAULT_PORT),
@@ -299,7 +499,8 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=_connection_schema(defaults),
             errors=errors or None,
             description_placeholders={
-                "name": str(record.get("name") or record.get("host"))
+                "name": str(record.get("name") or record.get("host")),
+                "fingerprint": _note(self._seen_fingerprint),
             },
         )
 
@@ -317,31 +518,29 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
             if isinstance(cleaned, str):
                 errors["base"] = cleaned
             else:
-                probe = await async_probe(
-                    self.hass,
-                    cleaned[CONF_HOST],
-                    cleaned[CONF_PORT],
-                    cleaned[CONF_SCHEME],
-                    cleaned[CONF_VERIFY_SSL],
+                outcome = await self._async_offer(
+                    cleaned,
+                    {},
+                    kiosk_id=None,
+                    source="manual",
+                    preserved={},
+                    stored=None,
                 )
-                if not probe.ok:
-                    errors["base"] = (
-                        "ssl_error" if probe.ssl_error else "cannot_connect"
-                    )
+                if isinstance(outcome, str):
+                    errors["base"] = outcome
+                elif outcome is not None:
+                    return outcome
                 elif create:
-                    candidate = Candidate(
-                        host=cleaned[CONF_HOST],
-                        port=cleaned[CONF_PORT],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        name=probe.name,
-                        source="manual",
-                    )
-                    records = apply_candidate(
+                    records = _records_for(
+                        cleaned,
+                        self._last_probe,
                         {},
-                        candidate,
-                        probe,
-                        verify_ssl=cleaned[CONF_VERIFY_SSL],
-                        scheme_mode=cleaned[CONF_SCHEME],
+                        kiosk_id=None,
+                        source="manual",
+                        preserved={},
+                        fingerprint=None
+                        if cleaned[CONF_VERIFY_SSL]
+                        else self._last_probe.cert_sha256,
                     )
                     await self.async_set_unique_id(DOMAIN)
                     return self.async_create_entry(
@@ -353,6 +552,30 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id=step_id,
             data_schema=_connection_schema({}),
             errors=errors or None,
+            description_placeholders={"fingerprint": _note(self._seen_fingerprint)},
+        )
+
+    async def _apply_pending(self, pending: _Pending) -> ConfigFlowResult:
+        """Create the entry, or save a reconfigured tablet."""
+        updated = _records_for(
+            pending.cleaned,
+            pending.probe,
+            pending.base,
+            kiosk_id=pending.kiosk_id,
+            source=pending.source,
+            preserved=pending.preserved,
+            fingerprint=pending.fingerprint,
+        )
+        if pending.source == "reconfigure":
+            return self.async_update_reload_and_abort(
+                self._get_reconfigure_entry(),
+                options={"kiosks": updated},
+            )
+        await self.async_set_unique_id(DOMAIN)
+        return self.async_create_entry(
+            title="Kiosk Mgmt",
+            data={},
+            options={"kiosks": updated},
         )
 
     @staticmethod
@@ -362,12 +585,15 @@ class KioskMgmtConfigFlow(ConfigFlow, domain=DOMAIN):
         return KioskMgmtOptionsFlow()
 
 
-class KioskMgmtOptionsFlow(OptionsFlowWithReload):
+class KioskMgmtOptionsFlow(_CertificateSteps, OptionsFlowWithReload):
     """Add, edit, ignore, and remove kiosks on the single entry."""
 
     def __init__(self) -> None:
         """Remember which kiosk the manage steps are about."""
         self._kiosk_id: str | None = None
+        self._pending = None
+        self._seen_fingerprint = None
+        self._last_probe = ProbeResult(ok=False, scheme=None, ssl_error=False)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -386,31 +612,29 @@ class KioskMgmtOptionsFlow(OptionsFlowWithReload):
                 errors["base"] = cleaned
             else:
                 records = kiosks_from_options(self.config_entry.options)
-                probe = await async_probe(
-                    self.hass,
-                    cleaned[CONF_HOST],
-                    cleaned[CONF_PORT],
-                    cleaned[CONF_SCHEME],
-                    cleaned[CONF_VERIFY_SSL],
+                outcome = await self._async_offer(
+                    cleaned,
+                    records,
+                    kiosk_id=None,
+                    source="manual",
+                    preserved={},
+                    stored=None,
                 )
-                if not probe.ok:
-                    errors["base"] = (
-                        "ssl_error" if probe.ssl_error else "cannot_connect"
-                    )
+                if isinstance(outcome, str):
+                    errors["base"] = outcome
+                elif outcome is not None:
+                    return outcome
                 else:
-                    candidate = Candidate(
-                        host=cleaned[CONF_HOST],
-                        port=cleaned[CONF_PORT],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        name=probe.name,
-                        source="manual",
-                    )
-                    updated = apply_candidate(
+                    updated = _records_for(
+                        cleaned,
+                        self._last_probe,
                         records,
-                        candidate,
-                        probe,
-                        verify_ssl=cleaned[CONF_VERIFY_SSL],
-                        scheme_mode=cleaned[CONF_SCHEME],
+                        kiosk_id=None,
+                        source="manual",
+                        preserved={},
+                        fingerprint=None
+                        if cleaned[CONF_VERIFY_SSL]
+                        else self._last_probe.cert_sha256,
                     )
                     if updated == records:
                         errors["base"] = "already_tracked"
@@ -420,7 +644,24 @@ class KioskMgmtOptionsFlow(OptionsFlowWithReload):
             step_id="add",
             data_schema=_connection_schema({}),
             errors=errors or None,
+            description_placeholders={"fingerprint": _note(self._seen_fingerprint)},
         )
+
+    async def _apply_pending(self, pending: _Pending) -> ConfigFlowResult:
+        """Save a kiosk added or edited from the options flow."""
+        updated = _records_for(
+            pending.cleaned,
+            pending.probe,
+            pending.base,
+            kiosk_id=pending.kiosk_id,
+            source=pending.source,
+            preserved=pending.preserved,
+            fingerprint=pending.fingerprint,
+        )
+        current = kiosks_from_options(self.config_entry.options)
+        if pending.kiosk_id is None and updated == current:
+            return self.async_abort(reason="cannot_connect")
+        return self.async_create_entry(data={"kiosks": updated})
 
     async def async_step_manage(
         self, user_input: dict[str, Any] | None = None
@@ -478,38 +719,30 @@ class KioskMgmtOptionsFlow(OptionsFlowWithReload):
             if isinstance(cleaned, str):
                 errors["base"] = cleaned
             else:
-                probe = await async_probe(
-                    self.hass,
-                    cleaned[CONF_HOST],
-                    cleaned[CONF_PORT],
-                    cleaned[CONF_SCHEME],
-                    cleaned[CONF_VERIFY_SSL],
+                outcome = await self._async_offer(
+                    cleaned,
+                    records,
+                    kiosk_id=kiosk_id,
+                    source="options",
+                    preserved=record,
+                    stored=record.get(ATTR_CERT_SHA256),
                 )
-                if not probe.ok:
-                    errors["base"] = (
-                        "ssl_error" if probe.ssl_error else "cannot_connect"
-                    )
-                else:
-                    candidate = Candidate(
-                        host=cleaned[CONF_HOST],
-                        port=cleaned[CONF_PORT],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        name=record.get("name"),
-                        mac=record.get("mac"),
-                        fleet_id=record.get("fleet_id"),
-                        node_name=record.get("node_name"),
-                        link_url=record.get("link_url"),
-                        source="options",
-                    )
-                    updated = apply_candidate(
-                        records,
-                        candidate,
-                        probe,
-                        verify_ssl=cleaned[CONF_VERIFY_SSL],
-                        scheme_mode=cleaned[CONF_SCHEME],
-                        kiosk_id=kiosk_id,
-                    )
-                    return self.async_create_entry(data={"kiosks": updated})
+                if isinstance(outcome, str):
+                    errors["base"] = outcome
+                elif outcome is not None:
+                    return outcome
+                updated = _records_for(
+                    cleaned,
+                    self._last_probe,
+                    records,
+                    kiosk_id=kiosk_id,
+                    source="options",
+                    preserved=record,
+                    fingerprint=None
+                    if cleaned[CONF_VERIFY_SSL]
+                    else self._last_probe.cert_sha256,
+                )
+                return self.async_create_entry(data={"kiosks": updated})
         defaults = {
             CONF_HOST: record.get("host", ""),
             CONF_PORT: record.get("port", DEFAULT_PORT),
@@ -521,7 +754,8 @@ class KioskMgmtOptionsFlow(OptionsFlowWithReload):
             data_schema=_connection_schema(defaults),
             errors=errors or None,
             description_placeholders={
-                "name": str(record.get("name") or record.get("host"))
+                "name": str(record.get("name") or record.get("host")),
+                "fingerprint": _note(self._seen_fingerprint),
             },
         )
 

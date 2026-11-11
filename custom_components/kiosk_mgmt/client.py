@@ -7,10 +7,19 @@ running Kiosk Satellite does not return that shape.
 
 Scheme ``auto`` tries HTTPS first, then HTTP. The app serves whichever
 protocol Remote Administration is set to, on the same port, and it does not
-redirect between them. ``verify_ssl`` is off unless the user opts in, because
-the certificate the app generates is self-signed. Those probes use Home
-Assistant's shared session with ``verify_ssl=False``. A kiosk set to check
-the certificate uses the verifying session, and only for its HTTPS attempt.
+redirect between them.
+
+HTTPS has three outcomes:
+
+- ``verify_ssl`` uses Home Assistant's verifying session (a certificate a
+  public authority signed).
+- A stored fingerprint uses :class:`aiohttp.Fingerprint` on the shared
+  unverified session, so the leaf must match and the authority is not
+  consulted.
+- No fingerprint yet observes the leaf once, without accepting it as
+  trusted. The config flow shows the digest before storing it. A kiosk
+  migrated from "do not check" is pinned by the coordinator on that same
+  observation.
 """
 
 from __future__ import annotations
@@ -20,9 +29,11 @@ from dataclasses import dataclass
 import logging
 import ssl
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
-from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientResponse, ClientTimeout
+from aiohttp.client_exceptions import ServerFingerprintMismatch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -34,6 +45,13 @@ from .const import (
     SCHEME_AUTO,
     SCHEME_HTTP,
     SCHEME_HTTPS,
+)
+from .tls import (
+    fingerprint_sha256,
+    normalize_fingerprint,
+    peer_fingerprint,
+    pinned_ssl,
+    unverified_context,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,7 +74,13 @@ _HEALTH_KEYS = frozenset(
 
 @dataclass(slots=True)
 class ProbeResult:
-    """What one pass over the admin port found."""
+    """What one pass over the admin port found.
+
+    ``cert_sha256`` is the leaf that was presented, lowercase hex, whenever
+    the handshake produced one. ``cert_mismatch`` means a stored pin did not
+    match that leaf. ``ok`` stays false in that case so callers do not treat
+    a changed certificate as a normal connect.
+    """
 
     ok: bool
     scheme: str | None
@@ -66,6 +90,8 @@ class ProbeResult:
     brand: str | None = None
     app_version: str | None = None
     ip: str | None = None
+    cert_sha256: str | None = None
+    cert_mismatch: bool = False
 
 
 def schemes_to_try(scheme_mode: str, preferred: str | None = None) -> list[str]:
@@ -98,25 +124,102 @@ def health_document(payload: Any) -> bool:
 
 def _ssl_failure(err: BaseException) -> bool:
     """Return True when the failure is a certificate problem."""
-    if isinstance(err, ssl.SSLError | aiohttp.ClientSSLError):
+    if isinstance(
+        err, ssl.SSLError | aiohttp.ClientSSLError | ServerFingerprintMismatch
+    ):
         return True
     return "SSL" in type(err).__name__ or "Certificate" in type(err).__name__
-
-
-def _session(hass: HomeAssistant, scheme: str, verify_ssl: bool) -> ClientSession:
-    """Return the shared session for this attempt.
-
-    Unverified HTTPS, and every plain HTTP probe, uses ``verify_ssl=False``.
-    The verifying session is only for an HTTPS kiosk whose option is on.
-    """
-    check = scheme == SCHEME_HTTPS and verify_ssl
-    return async_get_clientsession(hass, verify_ssl=check)
 
 
 def admin_url(scheme: str, host: str, port: int) -> str:
     """Build the remote admin URL for a host."""
     bracketed = f"[{host}]" if ":" in host and not host.startswith("[") else host
     return f"{scheme}://{bracketed}:{port}/"
+
+
+def _health_url(scheme: str, host: str, port: int) -> str:
+    """Return the health URL for one attempt."""
+    return f"{admin_url(scheme, host, port).rstrip('/')}{HEALTH_PATH}"
+
+
+def _from_payload(
+    scheme: str,
+    payload: Any,
+    *,
+    fingerprint: str | None,
+    ok: bool,
+    ssl_error: bool = False,
+    cert_mismatch: bool = False,
+) -> ProbeResult:
+    """Build a result from a health body, or an empty failure."""
+    if not health_document(payload):
+        return ProbeResult(
+            ok=False,
+            scheme=scheme,
+            ssl_error=ssl_error,
+            cert_sha256=fingerprint,
+            cert_mismatch=cert_mismatch,
+        )
+    return ProbeResult(
+        ok=ok,
+        scheme=scheme,
+        ssl_error=ssl_error,
+        name=_text(payload.get("name")),
+        model=_text(payload.get("model")),
+        brand=_text(payload.get("brand")),
+        app_version=_text(payload.get("appVersion")),
+        ip=_text(payload.get("ip")),
+        cert_sha256=fingerprint,
+        cert_mismatch=cert_mismatch,
+    )
+
+
+async def _body_and_fingerprint(
+    response: ClientResponse,
+) -> tuple[Any, str | None]:
+    """Read the JSON body and the leaf fingerprint while the connection is open."""
+    fingerprint = peer_fingerprint(response)
+    if response.status != 200:
+        _LOGGER.debug("Probe %s returned HTTP %s", response.url, response.status)
+        return None, fingerprint
+    try:
+        payload = await response.json(content_type=None)
+    except (ClientError, ValueError, TypeError) as err:
+        _LOGGER.debug("Probe %s did not return JSON: %s", response.url, err)
+        return None, fingerprint
+    return payload, fingerprint
+
+
+async def _observe(
+    hass: HomeAssistant,
+    url: str,
+    timeout: ClientTimeout,
+) -> tuple[Any, str | None]:
+    """Handshake without a CA check and return the body plus the leaf hash.
+
+    This is the one request that does not yet know which certificate to
+    expect. It is not a successful pin by itself.
+
+    aiohttp releases the connection as soon as a short body arrives, which
+    drops the SSL object before the caller can read it. A real session
+    therefore reads the leaf on a second handshake. Test doubles are left
+    alone so they do not open a socket.
+    """
+    session = async_get_clientsession(hass, verify_ssl=False)
+    async with session.get(
+        url,
+        timeout=timeout,
+        allow_redirects=False,
+        ssl=unverified_context(),
+    ) as response:
+        payload, fingerprint = await _body_and_fingerprint(response)
+    if (
+        fingerprint is None
+        and health_document(payload)
+        and type(session).__module__.startswith("aiohttp")
+    ):
+        fingerprint = await _leaf_on_new_connection(url, timeout)
+    return payload, fingerprint
 
 
 async def async_probe(
@@ -126,49 +229,213 @@ async def async_probe(
     scheme_mode: str = SCHEME_AUTO,
     verify_ssl: bool = False,
     preferred: str | None = None,
+    *,
+    pinned_sha256: str | None = None,
 ) -> ProbeResult:
     """Probe ``host`` and return the first health document, or a failure.
 
-    ``ssl_error`` is set when an HTTPS attempt failed the certificate check
-    and no later attempt succeeded. Callers use it for the repair that tells
-    the user to turn verification off.
+    ``ssl_error`` is set when HTTPS failed the certificate check and no
+    later attempt succeeded. ``cert_mismatch`` is set when a stored
+    fingerprint did not match. A mismatch does not fall through to HTTP:
+    the tablet answered TLS, and a different certificate is a reason to
+    stop rather than a reason to try the other protocol.
     """
     timeout = ClientTimeout(total=PROBE_TIMEOUT)
+    pin = None if verify_ssl else normalize_fingerprint(pinned_sha256)
     saw_ssl = False
+    captured: str | None = None
     for scheme in schemes_to_try(scheme_mode, preferred):
-        url = f"{admin_url(scheme, host, port).rstrip('/')}{HEALTH_PATH}"
-        session = _session(hass, scheme, verify_ssl)
+        url = _health_url(scheme, host, port)
         try:
-            async with (
-                asyncio.timeout(PROBE_TIMEOUT),
-                session.get(url, timeout=timeout, allow_redirects=False) as response,
-            ):
-                if response.status != 200:
-                    _LOGGER.debug("Probe %s returned HTTP %s", url, response.status)
-                    continue
-                payload = await response.json(content_type=None)
+            result = await _probe_scheme(
+                hass, url, scheme, timeout, verify_ssl=verify_ssl, pin=pin
+            )
         except TimeoutError:
             _LOGGER.debug("Probe %s timed out", url)
             continue
+        except ServerFingerprintMismatch as err:
+            # ``got`` is the SHA-256 digest aiohttp computed, not the
+            # certificate. Hex of those bytes is the fingerprint we store.
+            got = err.got.hex() if err.got else None
+            _LOGGER.debug("Probe %s certificate pin did not match", url)
+            observed = await _observe_after_mismatch(hass, url, timeout, got)
+            return observed
         except (ClientError, OSError, ssl.SSLError) as err:
             if _ssl_failure(err):
                 saw_ssl = True
+                captured = (
+                    await _capture_after_ssl_error(hass, url, timeout) or captured
+                )
             _LOGGER.debug("Probe %s failed: %s", url, err)
+            if scheme_mode == SCHEME_HTTPS and _ssl_failure(err):
+                break
             continue
+        if result is None:
+            continue
+        if result.cert_mismatch:
+            return result
+        if result.ok:
+            return result
+        if result.ssl_error:
+            saw_ssl = True
+            captured = result.cert_sha256 or captured
+            if scheme_mode == SCHEME_HTTPS:
+                break
+    return ProbeResult(
+        ok=False,
+        scheme=None,
+        ssl_error=saw_ssl,
+        cert_sha256=captured,
+    )
+
+
+async def _probe_scheme(
+    hass: HomeAssistant,
+    url: str,
+    scheme: str,
+    timeout: ClientTimeout,
+    *,
+    verify_ssl: bool,
+    pin: str | None,
+) -> ProbeResult | None:
+    """Try one scheme. None means try the next scheme."""
+    if scheme != SCHEME_HTTPS:
+        session = async_get_clientsession(hass, verify_ssl=False)
+        async with session.get(
+            url, timeout=timeout, allow_redirects=False, ssl=False
+        ) as response:
+            payload, _fingerprint = await _body_and_fingerprint(response)
         if not health_document(payload):
             _LOGGER.debug("Probe %s is not a Kiosk Satellite health document", url)
-            continue
-        return ProbeResult(
-            ok=True,
-            scheme=scheme,
-            ssl_error=False,
-            name=_text(payload.get("name")),
-            model=_text(payload.get("model")),
-            brand=_text(payload.get("brand")),
-            app_version=_text(payload.get("appVersion")),
-            ip=_text(payload.get("ip")),
+            return None
+        return _from_payload(scheme, payload, fingerprint=None, ok=True)
+
+    if verify_ssl:
+        return await _probe_authority(hass, url, timeout)
+
+    if pin:
+        session = async_get_clientsession(hass, verify_ssl=False)
+        async with session.get(
+            url, timeout=timeout, allow_redirects=False, ssl=pinned_ssl(pin)
+        ) as response:
+            payload, fingerprint = await _body_and_fingerprint(response)
+        if not health_document(payload):
+            _LOGGER.debug("Probe %s is not a Kiosk Satellite health document", url)
+            return None
+        return _from_payload(
+            SCHEME_HTTPS, payload, fingerprint=fingerprint or pin, ok=True
         )
-    return ProbeResult(ok=False, scheme=None, ssl_error=saw_ssl)
+
+    payload, fingerprint = await _observe(hass, url, timeout)
+    if not health_document(payload):
+        _LOGGER.debug("Probe %s is not a Kiosk Satellite health document", url)
+        return None
+    return _from_payload(SCHEME_HTTPS, payload, fingerprint=fingerprint, ok=True)
+
+
+async def _probe_authority(
+    hass: HomeAssistant, url: str, timeout: ClientTimeout
+) -> ProbeResult | None:
+    """Validate the certificate against the system trust store."""
+    session = async_get_clientsession(hass, verify_ssl=True)
+    try:
+        async with session.get(
+            url, timeout=timeout, allow_redirects=False, ssl=True
+        ) as response:
+            payload, fingerprint = await _body_and_fingerprint(response)
+    except (ClientError, OSError, ssl.SSLError) as err:
+        if not _ssl_failure(err):
+            raise
+        fingerprint = await _capture_after_ssl_error(hass, url, timeout)
+        _LOGGER.debug("Probe %s failed authority validation: %s", url, err)
+        return ProbeResult(
+            ok=False,
+            scheme=SCHEME_HTTPS,
+            ssl_error=True,
+            cert_sha256=fingerprint,
+        )
+    if not health_document(payload):
+        _LOGGER.debug("Probe %s is not a Kiosk Satellite health document", url)
+        return None
+    return _from_payload(SCHEME_HTTPS, payload, fingerprint=fingerprint, ok=True)
+
+
+async def _capture_after_ssl_error(
+    hass: HomeAssistant, url: str, timeout: ClientTimeout
+) -> str | None:
+    """Read the leaf after a rejected handshake so the flow can show it."""
+    try:
+        _payload, fingerprint = await _observe(hass, url, timeout)
+    except (ClientError, OSError, ssl.SSLError, TimeoutError) as err:
+        _LOGGER.debug("Could not read the certificate from %s: %s", url, err)
+        return None
+    return fingerprint
+
+
+async def _observe_after_mismatch(
+    hass: HomeAssistant,
+    url: str,
+    timeout: ClientTimeout,
+    got: str | None,
+) -> ProbeResult:
+    """Confirm the new certificate still belongs to a Kiosk Satellite.
+
+    The pin check fails before a response exists, so the health document is
+    read with a separate observation. ``ok`` stays false: the stored pin is
+    unchanged until the user accepts the new fingerprint.
+    """
+    payload: Any = None
+    fingerprint = got
+    try:
+        payload, observed = await _observe(hass, url, timeout)
+        fingerprint = observed or got
+    except (ClientError, OSError, ssl.SSLError, TimeoutError) as err:
+        _LOGGER.debug("Probe %s mismatched and could not be re-read: %s", url, err)
+    if health_document(payload):
+        return _from_payload(
+            SCHEME_HTTPS,
+            payload,
+            fingerprint=fingerprint,
+            ok=False,
+            ssl_error=True,
+            cert_mismatch=True,
+        )
+    return ProbeResult(
+        ok=False,
+        scheme=SCHEME_HTTPS,
+        ssl_error=True,
+        cert_sha256=fingerprint,
+        cert_mismatch=True,
+    )
+
+
+async def _leaf_on_new_connection(url: str, timeout: ClientTimeout) -> str | None:
+    """Return the leaf SHA-256 from a handshake this code still holds."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = parts.port or 443
+    limit = timeout.total or PROBE_TIMEOUT
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                host, port, ssl=unverified_context(), server_hostname=host
+            ),
+            limit,
+        )
+    except TimeoutError, OSError, ssl.SSLError:
+        return None
+    try:
+        ssl_object = writer.get_extra_info("ssl_object")
+        der = ssl_object.getpeercert(binary_form=True) if ssl_object else None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except ConnectionError, OSError:
+            pass
+    if not der:
+        return None
+    return fingerprint_sha256(der)
 
 
 def _text(value: Any) -> str | None:

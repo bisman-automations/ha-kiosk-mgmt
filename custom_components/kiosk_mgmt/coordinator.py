@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 
 from .client import ProbeResult, async_probe
 from .const import (
+    ATTR_CERT_SHA256,
     ATTR_IGNORED,
     ATTR_MAC,
     ATTR_SCHEME_MODE,
@@ -29,6 +30,7 @@ from .const import (
 )
 from .discovery import Candidate, candidates_from_registry
 from .records import apply_candidate, find_kiosk, kiosks_from_options, record_admin_url
+from .tls import format_fingerprint, normalize_fingerprint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ class KioskRuntime:
     online: bool
     last_seen: datetime | None
     ssl_error: bool
+    cert_mismatch: bool
+    presented_sha256: str | None
     ignored: bool
 
     @property
@@ -97,6 +101,8 @@ def runtime_from_record(
         online=online,
         last_seen=last_seen,
         ssl_error=bool(probe and probe.ssl_error and not online),
+        cert_mismatch=bool(probe and probe.cert_mismatch and not online),
+        presented_sha256=probe.cert_sha256 if probe else None,
         ignored=bool(record.get(ATTR_IGNORED)),
     )
 
@@ -132,7 +138,19 @@ class KioskCoordinator(DataUpdateCoordinator[dict[str, KioskRuntime]]):
                 str(record.get(ATTR_SCHEME_MODE) or SCHEME_AUTO),
                 bool(record.get(CONF_VERIFY_SSL)),
                 preferred=str(record.get(CONF_SCHEME) or "") or None,
+                pinned_sha256=record.get(ATTR_CERT_SHA256),
             )
+            # Migrated kiosks, and tablets found in the background, have no
+            # pin yet. The first health document that presents a leaf is the
+            # one we remember. A later change is a repair, not a silent update.
+            if (
+                probe.ok
+                and not record.get(CONF_VERIFY_SSL)
+                and probe.cert_sha256
+                and not record.get(ATTR_CERT_SHA256)
+            ):
+                record[ATTR_CERT_SHA256] = normalize_fingerprint(probe.cert_sha256)
+                self._persist()
             if probe.ok and probe.scheme and probe.scheme != record.get(CONF_SCHEME):
                 record[CONF_SCHEME] = probe.scheme
                 self._persist()
@@ -179,6 +197,11 @@ class KioskCoordinator(DataUpdateCoordinator[dict[str, KioskRuntime]]):
         if existing is not None and self.records[existing].get(ATTR_IGNORED):
             return False
         record = self.records.get(existing) if existing else None
+        use_verify = (
+            verify_ssl
+            if scheme_mode is not None
+            else bool((record or {}).get(CONF_VERIFY_SSL, verify_ssl))
+        )
         probe = await async_probe(
             self.hass,
             candidate.host,
@@ -186,18 +209,16 @@ class KioskCoordinator(DataUpdateCoordinator[dict[str, KioskRuntime]]):
             scheme_mode
             or (record or {}).get(ATTR_SCHEME_MODE)
             or candidate.scheme_mode,
-            verify_ssl
-            if scheme_mode is not None
-            else bool((record or {}).get(CONF_VERIFY_SSL, verify_ssl)),
+            use_verify,
+            pinned_sha256=(record or {}).get(ATTR_CERT_SHA256),
         )
         merged = apply_candidate(
             self.records,
             candidate,
             probe,
-            verify_ssl=verify_ssl
-            if scheme_mode is not None
-            else bool((record or {}).get(CONF_VERIFY_SSL, verify_ssl)),
+            verify_ssl=use_verify,
             scheme_mode=scheme_mode,
+            cert_sha256=probe.cert_sha256 if probe.ok else None,
         )
         if merged == self.records:
             return False
@@ -227,10 +248,43 @@ class KioskCoordinator(DataUpdateCoordinator[dict[str, KioskRuntime]]):
             seen.add(offline_id)
             seen.add(cert_id)
             placeholders = {"name": state.name, "host": state.host}
+            changed_id = _issue_id("certificate_changed", state.kiosk_id)
+            seen.add(changed_id)
             if state.online:
                 ir.async_delete_issue(self.hass, DOMAIN, offline_id)
                 ir.async_delete_issue(self.hass, DOMAIN, cert_id)
+                ir.async_delete_issue(self.hass, DOMAIN, changed_id)
                 continue
+            if state.cert_mismatch:
+                ir.async_delete_issue(self.hass, DOMAIN, offline_id)
+                ir.async_delete_issue(self.hass, DOMAIN, cert_id)
+                stored = normalize_fingerprint(
+                    self.records.get(state.kiosk_id, {}).get(ATTR_CERT_SHA256)
+                )
+                presented = normalize_fingerprint(state.presented_sha256)
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    changed_id,
+                    is_fixable=True,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="certificate_changed",
+                    translation_placeholders={
+                        **placeholders,
+                        "fingerprint": format_fingerprint(stored) if stored else "",
+                        "new_fingerprint": format_fingerprint(presented)
+                        if presented
+                        else "",
+                    },
+                    data={
+                        "entry_id": self.config_entry.entry_id,
+                        "kiosk_id": state.kiosk_id,
+                        "fingerprint": stored,
+                        "new_fingerprint": presented,
+                    },
+                )
+                continue
+            ir.async_delete_issue(self.hass, DOMAIN, changed_id)
             if state.ssl_error:
                 ir.async_delete_issue(self.hass, DOMAIN, offline_id)
                 ir.async_create_issue(

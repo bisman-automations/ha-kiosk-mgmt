@@ -10,7 +10,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import ATTR_IGNORED, CONF_SCHEME, CONF_VERIFY_SSL
+from .const import ATTR_CERT_SHA256, ATTR_IGNORED, CONF_SCHEME, CONF_VERIFY_SSL
 from .coordinator import KioskCoordinator, KioskMgmtConfigEntry
 from .records import kiosks_from_options
 
@@ -40,6 +40,7 @@ async def async_get_config_entry_diagnostics(
                 "scheme": record.get(CONF_SCHEME),
                 "scheme_mode": record.get("scheme_mode"),
                 "verify_ssl": record.get(CONF_VERIFY_SSL),
+                "cert_sha256": record.get(ATTR_CERT_SHA256),
                 "model": record.get("model"),
                 "brand": record.get("brand"),
                 "mac": record.get("mac"),
@@ -50,6 +51,7 @@ async def async_get_config_entry_diagnostics(
                 "source": record.get("source"),
                 "online": bool(state and state.online),
                 "ssl_error": bool(state and state.ssl_error),
+                "cert_mismatch": bool(state and state.cert_mismatch),
                 "last_seen": state.last_seen.isoformat()
                 if state and state.last_seen
                 else None,

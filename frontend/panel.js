@@ -1,9 +1,15 @@
 import { LitElement, css, html } from "lit";
 
-import { FRAME_LOAD_TIMEOUT_MS, frameMode } from "./logic.mjs";
+import { FRAME_LOAD_TIMEOUT_MS, PROXY_SOURCE, frameMode } from "./logic.mjs";
 
 /**
- * Admin sidebar panel: one tab per Kiosk Satellite, embedding its admin page.
+ * Admin sidebar panel: one tab per Kiosk Satellite.
+ *
+ * The iframe loads a signed Home Assistant proxy URL, not the tablet.
+ * The signed URL lasts a few minutes. This element refreshes it, and the
+ * cookie it sets, without navigating the iframe away from the page the
+ * user is on. If the frame never reports that it loaded, the tab shows a
+ * message, a retry, and a direct link to the tablet.
  */
 class KioskMgmtPanel extends LitElement {
   static properties = {
@@ -14,6 +20,8 @@ class KioskMgmtPanel extends LitElement {
     _selected: { state: true },
     _frame: { state: true },
     _attempt: { state: true },
+    _iframeUrl: { state: true },
+    _openUrl: { state: true },
   };
 
   constructor() {
@@ -22,19 +30,26 @@ class KioskMgmtPanel extends LitElement {
     this._selected = null;
     this._frame = "pending";
     this._attempt = 0;
+    this._iframeUrl = null;
+    this._openUrl = null;
     this._unsub = null;
     this._pending = false;
     this._timer = 0;
+    this._renewTimer = 0;
+    this._signGen = 0;
+    this._onMessage = (event) => this._handleMessage(event);
   }
 
   connectedCallback() {
     super.connectedCallback();
+    window.addEventListener("message", this._onMessage);
     this._subscribe();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this._clearTimer();
+    window.removeEventListener("message", this._onMessage);
+    this._clearTimers();
     if (this._unsub) {
       this._unsub();
       this._unsub = null;
@@ -45,8 +60,8 @@ class KioskMgmtPanel extends LitElement {
     if (changed.has("hass")) {
       this._subscribe();
     }
-    if (changed.has("_selected") || changed.has("_attempt") || changed.has("_kiosks")) {
-      this._armFrame();
+    if (changed.has("_selected") || changed.has("_attempt")) {
+      this._sign(true);
     }
   }
 
@@ -78,19 +93,45 @@ class KioskMgmtPanel extends LitElement {
     }
     this._selected = id;
     this._frame = "pending";
+    this._iframeUrl = null;
     this._attempt += 1;
   }
 
-  _armFrame() {
-    this._clearTimer();
+  async _sign(navigate) {
     const kiosk = this._kiosk;
-    if (!kiosk) {
+    const generation = ++this._signGen;
+    this._clearTimers();
+    if (!kiosk || !this.hass) {
+      this._iframeUrl = null;
+      this._openUrl = null;
       return;
     }
-    const mode = frameMode(window.location.protocol, kiosk, this._frame);
-    if (mode !== "iframe" || kiosk.scheme !== "https") {
-      return;
+    try {
+      const result = await this.hass.connection.sendMessagePromise({
+        type: "kiosk_mgmt/sign_proxy",
+        kiosk_id: kiosk.id,
+      });
+      if (generation !== this._signGen) {
+        return;
+      }
+      this._openUrl = result.url;
+      if (navigate) {
+        this._iframeUrl = result.url;
+        this._frame = "pending";
+        this._armLoadTimer();
+      }
+      this._armRenew(result.expires_in);
+    } catch (_err) {
+      if (generation !== this._signGen) {
+        return;
+      }
+      this._iframeUrl = null;
+      this._openUrl = null;
+      this._frame = "failed";
     }
+  }
+
+  _armLoadTimer() {
     this._timer = window.setTimeout(() => {
       if (this._frame !== "loaded") {
         this._frame = "failed";
@@ -98,25 +139,69 @@ class KioskMgmtPanel extends LitElement {
     }, FRAME_LOAD_TIMEOUT_MS);
   }
 
-  _clearTimer() {
+  _armRenew(expiresIn) {
+    const seconds = Number(expiresIn) || 300;
+    const delay = Math.max(15, seconds - 60) * 1000;
+    this._renewTimer = window.setTimeout(() => this._renew(), delay);
+  }
+
+  async _renew() {
+    const kiosk = this._kiosk;
+    if (!kiosk || !this.hass) {
+      return;
+    }
+    try {
+      const result = await this.hass.connection.sendMessagePromise({
+        type: "kiosk_mgmt/sign_proxy",
+        kiosk_id: kiosk.id,
+      });
+      this._openUrl = result.url;
+      // Refresh the cookie. redirect:manual still stores Set-Cookie and
+      // does not replace the document the iframe is showing.
+      await fetch(result.url, {
+        credentials: "same-origin",
+        redirect: "manual",
+        cache: "no-store",
+      });
+      this._armRenew(result.expires_in);
+    } catch (_err) {
+      this._armRenew(60);
+    }
+  }
+
+  _clearTimers() {
     if (this._timer) {
       window.clearTimeout(this._timer);
       this._timer = 0;
     }
+    if (this._renewTimer) {
+      window.clearTimeout(this._renewTimer);
+      this._renewTimer = 0;
+    }
   }
 
-  _onLoad() {
-    this._clearTimer();
-    this._frame = "loaded";
-  }
-
-  _onError() {
-    this._clearTimer();
+  _handleMessage(event) {
+    if (event.origin !== window.location.origin) {
+      return;
+    }
+    const data = event.data;
+    if (!data || data.source !== PROXY_SOURCE) {
+      return;
+    }
+    if (data.ok) {
+      if (this._timer) {
+        window.clearTimeout(this._timer);
+        this._timer = 0;
+      }
+      this._frame = "loaded";
+      return;
+    }
     this._frame = "failed";
   }
 
   _retry() {
     this._frame = "pending";
+    this._iframeUrl = null;
     this._attempt += 1;
   }
 
@@ -157,10 +242,11 @@ class KioskMgmtPanel extends LitElement {
   }
 
   _body(kiosk) {
-    const mode = frameMode(window.location.protocol, kiosk, this._frame);
+    const mode = frameMode(this._iframeUrl, this._frame);
     const seen = kiosk.last_seen
       ? new Date(kiosk.last_seen).toLocaleString()
       : "Not yet";
+    const openUrl = this._openUrl || kiosk.url;
     return html`
       <section class="info">
         <div><span>Name</span><strong>${kiosk.name}</strong></div>
@@ -171,48 +257,39 @@ class KioskMgmtPanel extends LitElement {
           <strong>${kiosk.online ? "Online" : "Offline"}</strong>
         </div>
         <div><span>Last seen</span><strong>${seen}</strong></div>
-        <a href=${kiosk.url} target="_blank" rel="noopener noreferrer">Open in new tab</a>
+        <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a>
       </section>
-      ${mode === "mixed"
+      ${mode === "error"
         ? html`
             <div class="card">
-              <h2>Can't embed this page</h2>
+              <h2>Can't load the admin page</h2>
               <p>
-                Home Assistant is open over HTTPS, and this kiosk's admin page is
-                plain HTTP. Browsers block that mix, so the page can't be shown
-                here. Open it in a new tab instead.
+                Home Assistant couldn't show this tablet's admin page. Retry the
+                connection through Home Assistant, or open the tablet directly.
+                Opening it directly may ask the browser to trust the tablet's
+                certificate, and a plain HTTP tablet will not load inside an
+                HTTPS Home Assistant page.
               </p>
-              <a class="button" href=${kiosk.url} target="_blank" rel="noopener noreferrer"
-                >Open in new tab</a
-              >
+              <div class="actions">
+                <button class="button" @click=${this._retry}>Retry</button>
+                <a class="button" href=${openUrl} target="_blank" rel="noopener noreferrer"
+                  >Open in new tab</a
+                >
+                <a class="button quiet-link" href=${kiosk.url} target="_blank" rel="noopener noreferrer"
+                  >Open tablet directly</a
+                >
+              </div>
             </div>
           `
-        : mode === "trust"
-          ? html`
-              <div class="card">
-                <h2>Trust certificate</h2>
-                <p>
-                  This kiosk's admin page uses HTTPS with a certificate this
-                  browser does not trust yet. Kiosk Satellite creates a
-                  self-signed certificate unless you imported one. Open the page
-                  in a new tab, accept the certificate once, then choose Retry.
-                </p>
-                <div class="actions">
-                  <a class="button" href=${kiosk.url} target="_blank" rel="noopener noreferrer"
-                    >Open in new tab</a
-                  >
-                  <button class="button" @click=${this._retry}>Retry</button>
-                </div>
-              </div>
-            `
-          : html`
-              <iframe
-                title=${`Admin for ${kiosk.name}`}
-                src=${`${kiosk.url}${kiosk.url.includes("?") ? "&" : "?"}km=${this._attempt}`}
-                @load=${this._onLoad}
-                @error=${this._onError}
-              ></iframe>
-            `}
+        : html`
+            <iframe
+              title=${`Admin for ${kiosk.name}`}
+              src=${this._iframeUrl}
+              @error=${() => {
+                this._frame = "failed";
+              }}
+            ></iframe>
+          `}
     `;
   }
 
@@ -250,6 +327,11 @@ class KioskMgmtPanel extends LitElement {
       text-decoration: none;
       cursor: pointer;
       font: inherit;
+    }
+    .quiet-link {
+      background: transparent;
+      color: var(--primary-color, #03a9f4);
+      border: 1px solid var(--primary-color, #03a9f4);
     }
     .tabs {
       display: flex;
@@ -300,7 +382,7 @@ class KioskMgmtPanel extends LitElement {
       flex: 1;
       width: 100%;
       border: 0;
-      background: #fff;
+      background: var(--primary-background-color, #111);
     }
     .card,
     .empty {
@@ -316,6 +398,7 @@ class KioskMgmtPanel extends LitElement {
     .actions {
       display: flex;
       gap: 8px;
+      flex-wrap: wrap;
     }
   `;
 }
