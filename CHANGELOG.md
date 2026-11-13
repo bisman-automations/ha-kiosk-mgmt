@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-11-13
+
+### Changed
+
+- **Smoother updates.** Each kind of entity now tells Home Assistant how many updates it can take at once, as Home Assistant recommends. Nothing changes in how anything looks or works.
+
 ## [0.1.2] - 2026-11-11
 
 ### Added
@@ -68,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.3]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bisman-automations/ha-kiosk-mgmt/releases/tag/v0.1.0
