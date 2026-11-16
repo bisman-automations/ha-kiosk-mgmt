@@ -94,6 +94,9 @@ embedded app's later requests, including POST and websockets, are
 authorized. The cookie covers every method and every path under the prefix.
 `ha-panel-custom` has no height of its own, so the panel sets its own
 pixel height from the viewport and the iframe fills what remains.
+The panel's `shouldUpdate` skips an update where only `hass` changed
+(`needsDraw` in `logic.mjs`): the page shows no entity states, and Home
+Assistant sends a new `hass` on every state change.
 
 The tablet's admin client sends its session as `Authorization: Bearer`.
 Home Assistant reads that header as its own token, and the proxy used to

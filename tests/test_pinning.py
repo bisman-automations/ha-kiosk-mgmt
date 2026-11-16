@@ -9,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.kiosk_mgmt.client import async_probe
 from custom_components.kiosk_mgmt.const import DOMAIN
 from custom_components.kiosk_mgmt.tls import format_fingerprint
+from homeassistant.components.repairs import repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
@@ -194,7 +195,11 @@ async def test_changed_certificate_raises_a_fixable_repair(
 
         assert await async_setup_component(hass, "repairs", {})
         await hass.async_block_till_done()
-        result = await hass.data["repairs"]["flow_manager"].async_init(
+        # The public helper: Home Assistant 2026.12 keeps repairs' data in a
+        # dataclass, so hass.data["repairs"]["flow_manager"] no longer works.
+        flows = repairs_flow_manager(hass)
+        assert flows is not None
+        result = await flows.async_init(
             DOMAIN,
             context={"issue_id": "certificate_changed_manual_1"},
         )
@@ -204,9 +209,7 @@ async def test_changed_certificate_raises_a_fixable_repair(
             format_fingerprint(changed.fingerprint)
             in result["description_placeholders"]["new_fingerprint"]
         )
-        result = await hass.data["repairs"]["flow_manager"].async_configure(
-            result["flow_id"], {}
-        )
+        result = await flows.async_configure(result["flow_id"], {})
         assert result["type"] == "create_entry"
         await hass.async_block_till_done()
         assert entry.options["kiosks"]["manual:1"]["cert_sha256"] == changed.fingerprint

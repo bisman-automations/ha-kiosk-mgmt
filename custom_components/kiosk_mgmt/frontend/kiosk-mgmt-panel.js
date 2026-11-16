@@ -598,6 +598,10 @@
     }
     return "Part of the admin page did not load. Retry, or turn on debug logging for Kiosk Mgmt and reproduce it.";
   }
+  function needsDraw(changed, hasUpdated) {
+    if (!hasUpdated) return true;
+    return !(changed.size === 1 && changed.has("hass"));
+  }
 
   // frontend/panel.js
   var KioskMgmtPanel = class extends i4 {
@@ -665,6 +669,11 @@
         this._unsub();
         this._unsub = null;
       }
+    }
+    shouldUpdate(changed) {
+      if (needsDraw(changed, this.hasUpdated)) return true;
+      this._subscribe();
+      return false;
     }
     updated(changed) {
       if (changed.has("hass")) {

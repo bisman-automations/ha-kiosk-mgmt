@@ -4,6 +4,7 @@ import {
   FRAME_LOAD_TIMEOUT_MS,
   PROXY_SOURCE,
   frameMode,
+  needsDraw,
   panelHeightPx,
   stretchedContainerBottom,
   subresourceNotice,
@@ -91,6 +92,13 @@ class KioskMgmtPanel extends LitElement {
       this._unsub();
       this._unsub = null;
     }
+  }
+
+  shouldUpdate(changed) {
+    if (needsDraw(changed, this.hasUpdated)) return true;
+    // Not drawn again, but live updates still need a connection.
+    this._subscribe();
+    return false;
   }
 
   updated(changed) {

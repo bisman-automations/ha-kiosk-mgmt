@@ -242,3 +242,11 @@ test("the shim rewrites fetch, XHR, websocket, EventSource, forms and location",
   target.document.listener({ target: form });
   assert.deepEqual(submitted, [`${CTX.prefix}/api/login`]);
 });
+
+test("only a new hass isn't drawn again once the page is up", async () => {
+  const { needsDraw } = await import("../frontend/logic.mjs");
+  assert.equal(needsDraw(new Map([["hass", {}]]), false), true);
+  assert.equal(needsDraw(new Map([["hass", {}]]), true), false);
+  assert.equal(needsDraw(new Map([["hass", {}], ["_selected", "a"]]), true), true);
+  assert.equal(needsDraw(new Map([["narrow", true]]), true), true);
+});

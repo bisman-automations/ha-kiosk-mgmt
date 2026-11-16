@@ -116,3 +116,14 @@ export function subresourceNotice(status, via) {
   }
   return "Part of the admin page did not load. Retry, or turn on debug logging for Kiosk Mgmt and reproduce it.";
 }
+
+
+/**
+ * Whether a Lit update needs drawing. Home Assistant gives the panel a new
+ * `hass` on every state change in the house; this page shows none of them,
+ * so once it has been drawn, a change of `hass` alone is skipped.
+ */
+export function needsDraw(changed, hasUpdated) {
+  if (!hasUpdated) return true;
+  return !(changed.size === 1 && changed.has("hass"));
+}
