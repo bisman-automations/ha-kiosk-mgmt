@@ -9,6 +9,7 @@ frame blank.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 import shutil
 from tempfile import TemporaryDirectory
@@ -83,6 +84,65 @@ _LOGIN = """
   return true;
 })()
 """
+
+# The splash sentence is "Starting remote administration". The login card
+# replaces it with the heading "Remote administration" on its own line.
+# "remote administration" is in both, so a substring of the splash is not
+# the loaded page.
+_SPLASH_TEXT = "Starting remote administration"
+_LOGIN_HEADING = "Remote administration"
+_POLL_INTERVAL = 0.25
+_READY_TIMEOUT = 10.0
+
+
+def _visible_lines(value: dict[str, Any]) -> list[str]:
+    """Non-empty lines of text the page is actually showing."""
+    return [
+        line.strip()
+        for line in str(value.get("text") or "").splitlines()
+        if line.strip()
+    ]
+
+
+def _login_card_ready(value: dict[str, Any]) -> bool:
+    """True once the splash is gone and the login field is laid out."""
+    lines = _visible_lines(value)
+    top = value.get("passwordTop")
+    bottom = value.get("passwordBottom")
+    return (
+        value.get("shim") == "1"
+        and _LOGIN_HEADING in lines
+        and _SPLASH_TEXT not in lines
+        and isinstance(top, (int, float))
+        and isinstance(bottom, (int, float))
+        and bottom > top
+    )
+
+
+def _admin_ready(value: dict[str, Any]) -> bool:
+    """True once login has opened the admin shell."""
+    lines = _visible_lines(value)
+    return "Kiosk admin ready" in lines and "Kitchen tablet" in lines
+
+
+async def _wait_for(
+    debug_port: int, ready: Callable[[dict[str, Any]], bool]
+) -> dict[str, Any]:
+    """Poll the iframe until ``ready`` holds, then return that measurement.
+
+    Same shape as Playwright's ``expect`` / ``wait_for_function``: retry on a
+    short interval until a timeout, and fail with the last measurement.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _READY_TIMEOUT
+    value: dict[str, Any] = {}
+    while True:
+        value = await _evaluate(debug_port, _MEASURE) or {}
+        if ready(value):
+            return value
+        if loop.time() >= deadline:
+            raise AssertionError(value)
+        await asyncio.sleep(_POLL_INTERVAL)
 
 
 async def _chrome(url: str, width: int, height: int):
@@ -179,30 +239,28 @@ async def test_panel_iframe_fills_and_login_reaches_the_tablet(
         url = await _panel_page(hass, hass_client, kiosk)
         process, profile, debug_port = await _chrome(url, 1280, 800)
         try:
-            value: dict[str, Any] = {}
-            for _ in range(40):
-                value = await _evaluate(debug_port, _MEASURE) or {}
-                if value.get("shim") == "1" and value.get("passwordTop") is not None:
-                    break
-                await asyncio.sleep(0.25)
+            # The password element is in the document while the splash still
+            # says "Starting remote administration". Wait until that splash is
+            # gone and the login heading is its own visible line. A substring
+            # of the splash would match the loading text.
+            value = await _wait_for(debug_port, _login_card_ready)
+            lines = _visible_lines(value)
             assert value.get("shim") == "1", value
             assert value["frameHeight"] > 400, value
             assert value["frameWidth"] > 1000, value
             assert value["hostHeight"] > value["frameHeight"], value
             assert value["passwordTop"] >= 0, value
             assert value["passwordBottom"] <= value["viewHeight"] + 1, value
-            assert "Remote administration" in value.get("text", "")
+            assert _LOGIN_HEADING in lines, value
+            assert _SPLASH_TEXT not in lines, value
 
             await _evaluate(debug_port, _LOGIN)
-            seen = ""
-            for _ in range(40):
-                value = await _evaluate(debug_port, _MEASURE) or {}
-                seen = value.get("text") or ""
-                if "Kiosk admin ready" in seen and "Kitchen tablet" in seen:
-                    break
-                await asyncio.sleep(0.25)
-            assert "Kiosk admin ready" in seen, value
-            assert "Kitchen tablet" in seen, value
+            # Login leaves the card and opens the admin shell. Wait for that
+            # shell's heading, not the first text that shares a word with it.
+            value = await _wait_for(debug_port, _admin_ready)
+            lines = _visible_lines(value)
+            assert "Kiosk admin ready" in lines, value
+            assert "Kitchen tablet" in lines, value
         finally:
             process.terminate()
             await process.wait()
@@ -221,15 +279,12 @@ async def test_panel_iframe_fills_a_phone_width(
         url = await _panel_page(hass, hass_client, kiosk)
         process, profile, debug_port = await _chrome(url, 390, 844)
         try:
-            value: dict[str, Any] = {}
-            for _ in range(40):
-                value = await _evaluate(debug_port, _MEASURE) or {}
-                if (
-                    value.get("passwordTop") is not None
-                    and value.get("frameHeight", 0) > 0
-                ):
-                    break
-                await asyncio.sleep(0.25)
+            # Same splash race as the desktop test: a hidden password has a
+            # zero box, which still looks "in view". Wait for the login card.
+            value = await _wait_for(debug_port, _login_card_ready)
+            lines = _visible_lines(value)
+            assert _LOGIN_HEADING in lines, value
+            assert _SPLASH_TEXT not in lines, value
             assert value["frameWidth"] > 320, value
             assert value["frameHeight"] > 400, value
             assert value["passwordTop"] >= 0, value

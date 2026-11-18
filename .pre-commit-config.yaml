@@ -1,4 +1,4 @@
-# Latest hook revisions as of 2026-11-17. Ruff matches requirements_test.txt.
+# Latest hook revisions as of 2026-11-18. Ruff matches requirements_test.txt.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

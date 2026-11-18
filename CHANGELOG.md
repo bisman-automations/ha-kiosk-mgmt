@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-11-18
+
+### Fixed
+
+- **The sidebar check waits until a tablet's login page has finished loading.** It used to read the page while it still said it was starting, and could fail even though the tablet was fine.
+
+### Changed
+
+- Test tools for this release: Ruff 0.17.5, pre-commit hooks v6.0.0, pytest-homeassistant-custom-component 0.13.375 (Home Assistant 2026.10.4), and GitHub Actions major version 7.
+
 ## [0.1.6] - 2026-11-17
 
 ### Fixed
@@ -98,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.7]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.3...v0.1.4
