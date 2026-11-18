@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.kiosk_mgmt.const import DOMAIN, PROXY_COOKIE
 from custom_components.kiosk_mgmt.proxy import (
+    _read_shim_source,
     hook_javascript,
     proxy_prefix,
     rewrite_location,
@@ -100,9 +101,13 @@ def test_hook_carries_the_shim_and_the_prefix() -> None:
     """The served script is the shim, with this tablet's prefix filled in."""
     prefix = "/api/kiosk_mgmt/proxy/entry/manual:1"
     script = hook_javascript(
-        prefix, ("http://192.0.2.10:2324", "https://192.0.2.10:2324")
+        prefix,
+        ("http://192.0.2.10:2324", "https://192.0.2.10:2324"),
+        _read_shim_source(),
     )
     assert "installNetworkShim" in script
+    # The module's exports are inlined as plain declarations inside the IIFE.
+    assert "export " not in script
     assert "X-Kiosk-Authorization" in script
     assert prefix in script
     root = Path(__file__).parents[1]

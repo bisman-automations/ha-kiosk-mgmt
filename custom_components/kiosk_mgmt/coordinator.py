@@ -24,6 +24,7 @@ from .const import (
     CONF_VERIFY_SSL,
     DEFAULT_PORT,
     DOMAIN,
+    ESPHOME_DOMAIN,
     SCHEME_AUTO,
     SIGNAL_KIOSKS_UPDATED,
     UPDATE_INTERVAL,
@@ -366,8 +367,6 @@ def async_link_esphome_devices(
     ``via_device_id`` is written only on our device and points at the ESPHome
     device with the same MAC, or the same name when there is exactly one.
     """
-    from .const import ESPHOME_DOMAIN
-
     registry = dr.async_get(hass)
     entry_id = coordinator.config_entry.entry_id
     for state in (coordinator.data or {}).values():

@@ -11,7 +11,11 @@ from typing import Any
 
 import probatio
 
-from homeassistant.components.repairs import RepairsFlow, RepairsFlowResult
+from homeassistant.components.repairs import (
+    ConfirmRepairFlow,
+    RepairsFlow,
+    RepairsFlowResult,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
@@ -131,8 +135,6 @@ async def async_create_fix_flow(
     data: dict[str, str | int | float | None] | None,
 ) -> RepairsFlow:
     """Start the certificate repair, or a confirm step for anything else."""
-    from homeassistant.components.repairs import ConfirmRepairFlow
-
     if data and issue_id.startswith("certificate_changed_"):
         entry_id = data.get("entry_id")
         kiosk_id = data.get("kiosk_id")

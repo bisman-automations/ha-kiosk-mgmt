@@ -19,30 +19,30 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 import ssl
 from typing import Any
 
 from aiohttp import Fingerprint
 
+from homeassistant.components.http.auth import DATA_SIGN_SECRET
 from homeassistant.core import HomeAssistant
+from homeassistant.util.ssl import get_default_no_verify_context
 
 _HEX = frozenset("0123456789abcdef")
-_UNVERIFIED: ssl.SSLContext | None = None
 
 
 def unverified_context() -> ssl.SSLContext:
     """Return a TLS client context that still negotiates, without CA checks.
 
-    Shared on purpose. :class:`ssl.SSLContext` is safe to reuse across
-    connections, and building one per probe shows up in profiles.
+    This is Home Assistant's shared no-verify context: it is built once,
+    when Home Assistant starts, so asking for it here never builds an
+    :class:`ssl.SSLContext` (and never loads anything from disk) on the
+    event loop. ``check_hostname`` is off and ``verify_mode`` is
+    ``CERT_NONE``, and the peer certificate is still readable with
+    ``getpeercert(binary_form=True)``, which is all pinning needs.
     """
-    global _UNVERIFIED
-    if _UNVERIFIED is None:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        _UNVERIFIED = context
-    return _UNVERIFIED
+    return get_default_no_verify_context()
 
 
 def normalize_fingerprint(value: Any) -> str | None:
@@ -106,12 +106,8 @@ def sign_secret(hass: HomeAssistant) -> bytes:
     drops signed URLs. The key is created on first use, which is what
     ``async_sign_path`` does too.
     """
-    from homeassistant.components.http.auth import DATA_SIGN_SECRET
-
     secret = hass.data.get(DATA_SIGN_SECRET)
     if not isinstance(secret, str) or not secret:
-        import secrets
-
         secret = secrets.token_hex()
         hass.data[DATA_SIGN_SECRET] = secret
     return secret.encode()

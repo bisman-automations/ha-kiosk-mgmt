@@ -1,4 +1,4 @@
-# Latest hook revisions as of 2026-11-10. Ruff matches requirements_test.txt.
+# Latest hook revisions as of 2026-11-17. Ruff matches requirements_test.txt.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -10,7 +10,7 @@ repos:
       - id: check-added-large-files
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.4
+    rev: v0.17.5
     hooks:
       - id: ruff
         args: [--fix]

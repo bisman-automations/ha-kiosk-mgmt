@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-11-17
+
+### Fixed
+
+- **Home Assistant no longer waits on a file while you open a tablet.** The sidebar used to read a script from disk on Home Assistant's main loop every time it opened a tablet's admin page. That script is now read once, in the background, when Kiosk Mgmt starts, and reused after that. If it can't be read, the page says Kiosk Mgmt needs reinstalling instead of failing silently. Raised in the review for the default HACS list.
+- **Nothing else waits on the disk either.** A check of the whole integration moved the remaining on-demand imports to load with Kiosk Mgmt. The connection to a tablet's self-signed certificate now reuses Home Assistant's own ready-made secure connection settings instead of building new ones.
+
+### Changed
+
+- Ruff 0.17.5 for the lint checks and pre-commit.
+
 ## [0.1.5] - 2026-11-15
 
 ### Changed
@@ -87,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.6]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.2...v0.1.3

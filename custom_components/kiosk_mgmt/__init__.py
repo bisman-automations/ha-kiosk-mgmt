@@ -11,10 +11,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    issue_registry as ir,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.setup import async_setup_component
 
 from .const import (
     CONF_KIOSK_ID,
@@ -27,7 +32,7 @@ from .const import (
 from .coordinator import KioskCoordinator, async_link_esphome_devices
 from .discovery import async_watch_mdns
 from .panel import async_register_panel, async_unregister_panel
-from .proxy import register_proxy
+from .proxy import async_load_shim, register_proxy
 from .records import kiosks_from_options, without
 from .websocket_api import async_register_websocket
 
@@ -46,11 +51,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Tests construct Home Assistant without the HTTP server. A normal
     # startup has already created it before this integration loads.
     if hass.http is None:
-        from homeassistant.setup import async_setup_component
-
         await async_setup_component(hass, "http", {})
     async_register_websocket(hass)
     register_proxy(hass)
+    # Read the iframe hook's script now, in the executor, so the proxy never
+    # reads it on the event loop. A failed read is retried on first use.
+    try:
+        await async_load_shim(hass)
+    except OSError:
+        _LOGGER.exception("Kiosk Mgmt could not read its proxy script")
     await async_register_panel(hass, static=True, panel=False)
     _async_register_services(hass)
     return True
@@ -126,8 +135,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: KioskMgmtConfigEntry) -
 
 async def async_remove_entry(hass: HomeAssistant, entry: KioskMgmtConfigEntry) -> None:
     """Drop repairs when the entry is deleted."""
-    from homeassistant.helpers import issue_registry as ir
-
     registry = ir.async_get(hass)
     for issue in list(registry.issues.values()):
         if issue.domain == DOMAIN:

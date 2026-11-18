@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta
 import gzip
 import hmac
@@ -92,6 +93,8 @@ _MAX_REWRITE = 8 * 1024 * 1024
 _MAX_BUFFER = 1024 * 1024
 _CHUNK = 64 * 1024
 _SHIM_PATH = Path(__file__).parent / "frontend" / "shim.mjs"
+# Where the shim's source is cached once it has been read (in the executor).
+_DATA_SHIM = "shim"
 _HOP = frozenset(
     {
         "connection",
@@ -422,23 +425,75 @@ def _inject_hook(html: str, prefix: str) -> str:
     return snippet + html
 
 
-def hook_javascript(prefix: str, origins: tuple[str, str]) -> str:
+def _read_shim_source() -> str:
+    """Read ``shim.mjs`` and turn its exports into plain declarations.
+
+    Blocking file I/O: only ever run in the executor, through
+    :func:`async_load_shim`. The hook script inlines the module inside an
+    IIFE, where ``export`` is a syntax error, so the keywords are dropped
+    here once instead of on every request.
+    """
+    source = _SHIM_PATH.read_text(encoding="utf-8")
+    source = source.replace("export function ", "function ")
+    return source.replace("export const ", "const ")
+
+
+@dataclass
+class _ShimCache:
+    """The shim's source, read at most once per Home Assistant run.
+
+    ``lock`` makes concurrent first requests share a single executor read
+    instead of each starting their own.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    source: str | None = None
+
+
+def _shim_cache(hass: HomeAssistant) -> _ShimCache:
+    """Return this instance's shim cache, creating it on first use."""
+    data: dict[str, Any] = hass.data.setdefault(DOMAIN, {})
+    cache = data.get(_DATA_SHIM)
+    if not isinstance(cache, _ShimCache):
+        cache = data[_DATA_SHIM] = _ShimCache()
+    return cache
+
+
+async def async_load_shim(hass: HomeAssistant) -> str:
+    """Return the shim's source, reading the file in the executor the first time.
+
+    Called from ``async_setup`` so the file is normally read before the
+    first tablet page is opened, and again from the proxy view in case that
+    read failed. The event loop never touches the disk: the read runs in
+    the executor and later calls return the cached string.
+
+    Raises :class:`OSError` when the file can't be read (a broken install).
+    """
+    cache = _shim_cache(hass)
+    if cache.source is not None:
+        return cache.source
+    async with cache.lock:
+        if cache.source is None:  # another request may have read it meanwhile
+            cache.source = await hass.async_add_executor_job(_read_shim_source)
+        return cache.source
+
+
+def hook_javascript(prefix: str, origins: tuple[str, str], shim_source: str) -> str:
     """Return the script that rewrites URLs the static pass cannot see.
 
     The functions live in ``frontend/shim.mjs`` (shipped next to the built
-    panel) so the Node tests and this response cannot drift apart. Fetch,
-    XHR, websockets, EventSource, forms and location changes run after the
-    document is parsed. The constants are JSON so a tablet name cannot break
-    out of the script.
+    panel) so the Node tests and this response cannot drift apart.
+    ``shim_source`` is that file as returned by :func:`async_load_shim`;
+    this function does no I/O, so it is safe to call from the event loop.
+    Fetch, XHR, websockets, EventSource, forms and location changes run
+    after the document is parsed. The constants are JSON so a tablet name
+    cannot break out of the script.
     """
     http_origin, https_origin = origins
     ws_origins = [
         "ws" + http_origin.removeprefix("http"),
         "wss" + https_origin.removeprefix("https"),
     ]
-    source = _SHIM_PATH.read_text(encoding="utf-8")
-    source = source.replace("export function ", "function ")
-    source = source.replace("export const ", "const ")
     ctx = {
         "prefix": prefix,
         "origins": [http_origin, https_origin],
@@ -450,7 +505,7 @@ def hook_javascript(prefix: str, origins: tuple[str, str]) -> str:
         f"  const __KM_CTX__ = {json.dumps(ctx)};\n"
         "  __KM_CTX__.pageProtocol = location.protocol;\n"
         "  __KM_CTX__.pageHost = location.host;\n"
-        f"{source}\n"
+        f"{shim_source}\n"
         "  installNetworkShim(window, __KM_CTX__);\n"
         "})();\n"
     )
@@ -534,8 +589,19 @@ class KioskProxyView(HomeAssistantView):
         prefix = proxy_prefix(entry_id, kiosk_id)
         if path.rstrip("/") == PROXY_HOOK:
             origins = _origins(record)
+            hass: HomeAssistant = request.app[KEY_HASS]
+            try:
+                # Cached after the first read, which runs in the executor.
+                shim_source = await async_load_shim(hass)
+            except OSError:
+                _LOGGER.exception("Kiosk Mgmt could not read %s", _SHIM_PATH.name)
+                return _error_page(
+                    500,
+                    "Kiosk Mgmt is damaged",
+                    "A file Kiosk Mgmt needs is missing. Reinstall Kiosk Mgmt.",
+                )
             return web.Response(
-                text=hook_javascript(prefix, origins),
+                text=hook_javascript(prefix, origins, shim_source),
                 content_type="application/javascript",
                 headers={
                     "Cache-Control": "no-store",

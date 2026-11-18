@@ -26,7 +26,9 @@ anything.
     `frontend/` at the repo root; `npm run build` refreshes it).
 - `frontend/`: panel source. `logic.mjs` is the part the Node tests import.
   `shim.mjs` is the iframe hook; `npm run build` copies it next to the
-  built panel so the proxy can serve the same file the tests import.
+  built panel so the proxy can serve the same file the tests import. The
+  proxy reads it once, in the executor, from `async_setup`
+  (`proxy.async_load_shim`) and builds every hook from that cached string.
 - `tests/`: pytest, plus `tests/panel.test.mjs`.
 - `README.md` is user documentation; `CHANGELOG.md` is the release history.
 
@@ -39,6 +41,13 @@ custom_components/kiosk_mgmt` from a Home Assistant core checkout of the
 version under test (hassfest is not installed with the test harness).
 
 ## Conventions
+
+No blocking I/O on the event loop, anywhere (raised in the HACS review,
+hacs/default#14090). Read files with `hass.async_add_executor_job`, cache
+what doesn't change, import at module level (the integration module is
+imported in the executor), and use Home Assistant's prebuilt SSL contexts
+(`homeassistant.util.ssl`) instead of building one. `tests/test_blocking_io.py`
+covers the proxy script and the TLS context.
 
 Discovery follows the Kiosk Satellite app, not guesses:
 

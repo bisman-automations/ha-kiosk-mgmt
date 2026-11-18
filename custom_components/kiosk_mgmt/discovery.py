@@ -26,6 +26,9 @@ import logging
 from typing import Any
 from urllib.parse import urlsplit
 
+from zeroconf import ServiceBrowser, ServiceStateChange
+
+from homeassistant.components.zeroconf import async_get_instance
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import format_mac
@@ -254,10 +257,6 @@ async def async_watch_mdns(
     """
     if "zeroconf" not in hass.config.components:
         return lambda: None
-    from zeroconf import ServiceBrowser, ServiceStateChange
-
-    from homeassistant.components.zeroconf import async_get_instance
-
     zc = await async_get_instance(hass)
 
     def _handler(
