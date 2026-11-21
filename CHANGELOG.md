@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-11-21
+
+### Changed
+
+- **Ruff 0.17.6.** Linting uses the current Ruff release. Nothing changes for you.
+
 ## [0.1.8] - 2026-11-20
 
 ### Fixed
@@ -114,6 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.9]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.5...v0.1.6
