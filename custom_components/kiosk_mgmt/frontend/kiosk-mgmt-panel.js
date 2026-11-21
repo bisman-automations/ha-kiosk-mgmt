@@ -602,6 +602,13 @@
     if (!hasUpdated) return true;
     return !(changed.size === 1 && changed.has("hass"));
   }
+  function refreshLabel(busy) {
+    return busy ? "Refreshing\u2026" : "Refresh";
+  }
+  function refreshErrorText(err) {
+    const message = err && typeof err === "object" && typeof err.message === "string" ? err.message.trim() : "";
+    return message ? `Couldn't refresh: ${message}` : "Couldn't refresh. Check that Home Assistant is running and try again.";
+  }
 
   // frontend/panel.js
   var KioskMgmtPanel = class extends i4 {
@@ -613,6 +620,8 @@
       _selected: { state: true },
       _frame: { state: true },
       _attempt: { state: true },
+      _refreshing: { state: true },
+      _refreshError: { state: true },
       _iframeUrl: { state: true },
       _openUrl: { state: true },
       _problem: { state: true }
@@ -623,6 +632,8 @@
       this._selected = null;
       this._frame = "pending";
       this._attempt = 0;
+      this._refreshing = false;
+      this._refreshError = null;
       this._iframeUrl = null;
       this._openUrl = null;
       this._problem = null;
@@ -868,8 +879,28 @@
       this._problem = null;
       this._attempt += 1;
     }
+    /**
+     * Probe every device again and load the selected admin page again.
+     *
+     * The service alone only updated the details row, so the page in the
+     * frame (or the "Can't load" card) stayed as it was and the button looked
+     * broken. It also gave no sign it was working, and a failed call was an
+     * unhandled rejection the user never saw.
+     */
     async _refresh() {
-      await this.hass.callService("kiosk_mgmt", "refresh");
+      if (this._refreshing || !this.hass) {
+        return;
+      }
+      this._refreshing = true;
+      this._refreshError = null;
+      try {
+        await this.hass.callService("kiosk_mgmt", "refresh");
+      } catch (err) {
+        this._refreshError = refreshErrorText(err);
+      } finally {
+        this._refreshing = false;
+      }
+      this._retry();
     }
     render() {
       const kiosk = this._kiosk;
@@ -877,8 +908,15 @@
       <div class="wrap">
         <header>
           <h1>Kiosk Mgmt</h1>
-          <button class="quiet" @click=${this._refresh}>Refresh</button>
+          <button
+            class="quiet"
+            ?disabled=${this._refreshing}
+            @click=${this._refresh}
+          >
+            ${refreshLabel(this._refreshing)}
+          </button>
         </header>
+        ${this._refreshError ? b2`<div class="banner" role="alert">${this._refreshError}</div>` : ""}
         ${this._kiosks.length ? b2`
               <div class="tabs" role="tablist">
                 ${this._kiosks.map(
@@ -998,6 +1036,11 @@
       text-decoration: none;
       cursor: pointer;
       font: inherit;
+    }
+    .quiet:disabled,
+    .button:disabled {
+      opacity: 0.6;
+      cursor: default;
     }
     .quiet-link {
       background: transparent;

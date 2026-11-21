@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-11-20
+
+### Fixed
+
+- **Refresh does what it says.** Refresh only checked each tablet again in the background, so the page in the panel stayed as it was and the button seemed to do nothing. It now also loads the tablet's page again, including after a "Can't load the admin page" message. The button reads **Refreshing…** while it works, and if Home Assistant refuses or fails, the panel says why instead of nothing happening.
+
 ## [0.1.7] - 2026-11-18
 
 ### Fixed
@@ -108,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.8]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.4...v0.1.5
