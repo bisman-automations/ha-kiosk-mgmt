@@ -188,7 +188,7 @@ def _device_mac(device: dr.DeviceEntry) -> str | None:
     return None
 
 
-def _is_kiosk_device(device: dr.DeviceEntry) -> bool:
+def is_kiosk_device(device: dr.DeviceEntry) -> bool:
     """Return True when an ESPHome device row is a Kiosk Satellite.
 
     Manufacturer and model come from the project name Home Assistant splits.
@@ -219,7 +219,7 @@ def candidates_from_registry(hass: HomeAssistant) -> list[Candidate]:
     found: list[Candidate] = []
     for entry in esphome_entries:
         for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
-            if not _is_kiosk_device(device):
+            if not is_kiosk_device(device):
                 continue
             mac = _device_mac(device)
             if mac is None:

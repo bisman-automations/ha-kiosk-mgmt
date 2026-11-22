@@ -35,6 +35,9 @@ def _track(
     known: set[str] = set()
 
     def _sync() -> None:
+        # A removed kiosk's entity removes itself. Forget its id so the
+        # entities come back if the tablet is found again.
+        known.intersection_update(coordinator.data or {})
         fresh = [
             factory(coordinator, kiosk_id)
             for kiosk_id in (coordinator.data or {})

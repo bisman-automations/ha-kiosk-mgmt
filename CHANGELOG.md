@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-11-22
+
+### Fixed
+
+- **A removed tablet comes back properly.** If you removed a tablet with the Remove kiosk action and Kiosk Mgmt then found it again, its Connectivity and Last seen sensors stayed unavailable until Home Assistant restarted. They now come back as soon as the tablet is found.
+
+### Changed
+
+- **Less work when other devices change.** Kiosk Mgmt used to look through Home Assistant's device list, and check every tablet it found there over the network, whenever any device in your home changed. It now only looks when an ESPHome device that is a Kiosk Satellite is added or changes something Kiosk Mgmt reads (its name, address, MAC, manufacturer or model). Renaming a tablet in Home Assistant no longer sets off a check either.
+
 ## [0.1.9] - 2026-11-21
 
 ### Changed
@@ -120,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.1.10]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.6...v0.1.7

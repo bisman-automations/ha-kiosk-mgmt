@@ -10,7 +10,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.kiosk_mgmt.const import DOMAIN
 from custom_components.kiosk_mgmt.discovery import Candidate
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import Context
 from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -358,3 +358,81 @@ async def test_diagnostics_have_no_secrets(hass: Any, monkeypatch: Any) -> None:
         er.async_get(hass).async_get("binary_sensor.kitchen_tablet_connectivity")
         is not None
     )
+
+
+async def test_device_changes_elsewhere_do_not_probe(
+    hass: Any, monkeypatch: Any
+) -> None:
+    """Only an ESPHome Kiosk Satellite row makes the registry scan probe."""
+    calls = _patch(monkeypatch, probe_ok())
+    esphome = MockConfigEntry(domain="esphome", data={}, unique_id="esphome-1")
+    esphome.add_to_hass(hass)
+    other = MockConfigEntry(domain="hue", data={}, unique_id="hue-1")
+    other.add_to_hass(hass)
+    entry = await _setup(hass)
+    device_registry = dr.async_get(hass)
+    lamp = device_registry.async_get_or_create(
+        config_entry_id=other.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, "11:22:33:44:55:66")},
+        name="Lamp",
+    )
+    await hass.async_block_till_done()
+    device_registry.async_update_device(lamp.id, name_by_user="Desk lamp")
+    await hass.async_block_till_done()
+    assert calls == []
+
+    tablet = device_registry.async_get_or_create(
+        config_entry_id=esphome.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, MAC)},
+        manufacturer="kiosk_satellite",
+        model="bluetooth_proxy",
+        name="Kitchen tablet",
+        configuration_url=f"http://{HOST}:2324",
+    )
+    await hass.async_block_till_done()
+    assert len(entry.options["kiosks"]) == 1
+    probed = len(calls)
+    assert probed > 0
+
+    # Renaming the tablet in Home Assistant changes nothing the scan reads.
+    device_registry.async_update_device(tablet.id, name_by_user="Hall")
+    await hass.async_block_till_done()
+    assert len(calls) == probed
+
+
+async def test_removed_kiosk_gets_entities_back_when_found_again(
+    hass: Any, monkeypatch: Any
+) -> None:
+    """A tablet removed with the action and then rediscovered has entities."""
+    _patch(monkeypatch, probe_ok())
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data
+    candidate = Candidate(
+        host=HOST,
+        port=2324,
+        scheme_mode="http",
+        name="Kitchen tablet",
+        fleet_id="android-1",
+        source="zeroconf",
+    )
+    assert await coordinator.async_adopt(candidate)
+    await hass.async_block_till_done()
+    entity_id = "binary_sensor.kitchen_tablet_connectivity"
+    assert hass.states.get(entity_id).state == STATE_ON
+
+    kiosk_id = next(iter(entry.options["kiosks"]))
+    await hass.services.async_call(
+        DOMAIN, "remove_kiosk", {"kiosk_id": kiosk_id}, blocking=True
+    )
+    # The action's refresh is debounced; run it now.
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    # The registry entry stays, so Home Assistant shows it as unavailable.
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    assert await coordinator.async_adopt(candidate, refresh=False)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.state == STATE_ON

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from functools import partial
 import logging
 from typing import Any
 
@@ -24,13 +26,14 @@ from homeassistant.setup import async_setup_component
 from .const import (
     CONF_KIOSK_ID,
     DOMAIN,
+    ESPHOME_DOMAIN,
     SERVICE_IGNORE,
     SERVICE_REFRESH,
     SERVICE_REMOVE,
     SIGNAL_KIOSKS_UPDATED,
 )
 from .coordinator import KioskCoordinator, async_link_esphome_devices
-from .discovery import async_watch_mdns
+from .discovery import async_watch_mdns, is_kiosk_device
 from .panel import async_register_panel, async_unregister_panel
 from .proxy import async_load_shim, register_proxy
 from .records import kiosks_from_options, without
@@ -118,7 +121,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: KioskMgmtConfigEntry) ->
         hass.async_create_task(coordinator.async_scan_registry())
 
     entry.async_on_unload(
-        hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, _scan_registry)
+        hass.bus.async_listen(
+            dr.EVENT_DEVICE_REGISTRY_UPDATED,
+            _scan_registry,
+            event_filter=partial(_may_be_kiosk_device, hass),
+        )
     )
     entry.async_on_unload(coordinator.async_shutdown)
     _dispatch(hass)
@@ -139,6 +146,40 @@ async def async_remove_entry(hass: HomeAssistant, entry: KioskMgmtConfigEntry) -
     for issue in list(registry.issues.values()):
         if issue.domain == DOMAIN:
             ir.async_delete_issue(hass, DOMAIN, issue.issue_id)
+
+
+# Device fields the registry scan reads. An update that changes none of them
+# can't add or move a kiosk.
+_SCANNED_FIELDS = frozenset(
+    {
+        "config_entry_id",
+        "configuration_url",
+        "connections",
+        "manufacturer",
+        "model",
+        "name",
+    }
+)
+
+
+@callback
+def _may_be_kiosk_device(hass: HomeAssistant, data: Mapping[str, Any]) -> bool:
+    """Return True for a device registry change the kiosk scan could act on.
+
+    The scan probes every Kiosk Satellite over the network, so it must not
+    run for every device change in the home, nor for our own devices.
+    """
+    if data.get("action") == "remove":
+        return False
+    device = dr.async_get(hass).async_get(str(data.get("device_id")))
+    if device is None or not is_kiosk_device(device):
+        return False
+    entry = hass.config_entries.async_get_entry(device.config_entry_id or "")
+    if entry is None or entry.domain != ESPHOME_DOMAIN:
+        return False
+    if data.get("action") == "update":
+        return bool(_SCANNED_FIELDS.intersection(data.get("changes") or {}))
+    return True
 
 
 @callback
