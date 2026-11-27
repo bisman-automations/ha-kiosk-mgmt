@@ -163,6 +163,10 @@ it back. **Remove** forgets it, so a later discovery can add it again.
   anything you'd rather not share).
 - **Debug logs:** on the integration's page choose **Enable debug logging**,
   reproduce the problem, then **Disable debug logging** to download the log.
+  Kiosk Mgmt's lines show only the tablet's own path, never the session in
+  the embedded page's address. Debug logging for Home Assistant's own web
+  server does show full addresses, and an address with the session opens the
+  tablet for up to 12 hours, so leave that off when you share a log.
 - Report problems at [Issues](https://github.com/bisman-automations/ha-kiosk-mgmt/issues).
 
 ## Development

@@ -411,3 +411,14 @@ async def test_login_round_trip_reaches_the_tablet(
         ) as websocket:
             assert "Kitchen tablet" in await websocket.receive_str()
         assert ADMIN_TOKEN not in caplog.text
+        # The session in the prefix opens the tablet by itself, so the log
+        # shows only the path after it (hacs/default#14090).
+        session_part = prefix.rsplit("/", 1)[1]
+        ours = "\n".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("custom_components.kiosk_mgmt")
+        )
+        assert session_part not in ours
+        assert "Proxied GET /api/info" in ours
+        assert "Proxied websocket /api/ws" in ours

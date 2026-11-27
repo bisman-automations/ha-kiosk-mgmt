@@ -418,6 +418,15 @@ def _rewrite_static(match: re.Match[str], prefix: str) -> str:
     return f"{match.group('quote')}{prefix}/static/{match.group('rest')}"
 
 
+def _log_path(path: str) -> str:
+    """Return the part of a proxied path after the prefix, for the log.
+
+    The prefix carries the session, which opens the tablet's admin page by
+    itself, so it never goes into the log (hacs/default#14090).
+    """
+    return "/" + path.lstrip("/")
+
+
 def _redact(url: str) -> str:
     """Hide a websocket token before a URL is written to the log."""
     return _TOKEN_QUERY.sub(r"\1***", url)
@@ -897,7 +906,7 @@ async def _proxy_http(
         _LOGGER.debug(
             "Proxy upstream error %s %s -> %s: %s",
             request.method,
-            request.path,
+            _log_path(path),
             _redact(upstream),
             err,
         )
@@ -910,7 +919,7 @@ async def _proxy_http(
         _LOGGER.debug(
             "Proxied %s %s -> %s (%s)",
             request.method,
-            request.path,
+            _log_path(path),
             _redact(upstream),
             upstream_response.status,
         )
@@ -1072,7 +1081,7 @@ async def _proxy_websocket(
     except (ClientError, OSError, TimeoutError) as err:
         _LOGGER.debug(
             "Proxy upstream error websocket %s -> %s: %s",
-            request.path,
+            _log_path(path),
             _redact(upstream_url),
             err,
         )
@@ -1080,7 +1089,7 @@ async def _proxy_websocket(
         return client
     _LOGGER.debug(
         "Proxied websocket %s -> %s",
-        request.path,
+        _log_path(path),
         _redact(upstream_url),
     )
 
