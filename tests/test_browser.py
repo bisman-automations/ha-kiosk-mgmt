@@ -74,6 +74,9 @@ async def _evaluate(debug_port: int, expression: str, *, in_frame: bool = False)
                 frameId=children[0]["frame"]["id"],
                 worldName="kiosk-mgmt-test",
             )
+            if "executionContextId" not in world:
+                # The frame is still navigating; the caller polls again.
+                return None
             params["contextId"] = world["executionContextId"]
         message = await _cdp(websocket, counter, "Runtime.evaluate", **params)
     result = message.get("result", {})
@@ -294,7 +297,10 @@ async def test_panel_iframe_fills_and_login_reaches_the_tablet(
             assert _LOGIN_HEADING in lines, value
             assert _SPLASH_TEXT not in lines, value
 
-            await _evaluate(debug_port, _LOGIN, in_frame=True)
+            for _ in range(40):
+                if await _evaluate(debug_port, _LOGIN, in_frame=True):
+                    break
+                await asyncio.sleep(_POLL_INTERVAL)
             # Login leaves the card and opens the admin shell. Wait for that
             # shell's heading, not the first text that shares a word with it.
             value = await _wait_for(debug_port, _admin_ready)
