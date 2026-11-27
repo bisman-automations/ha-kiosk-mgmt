@@ -2,8 +2,9 @@ import { LitElement, css, html } from "lit";
 
 import {
   FRAME_LOAD_TIMEOUT_MS,
-  PROXY_SOURCE,
+  FRAME_SANDBOX,
   frameMode,
+  fromOwnFrame,
   needsDraw,
   panelHeightPx,
   refreshErrorText,
@@ -15,11 +16,12 @@ import {
 /**
  * Admin sidebar panel: one tab per Kiosk Satellite.
  *
- * The iframe loads a signed Home Assistant proxy URL, not the tablet.
- * The signed URL lasts a few minutes. This element refreshes it, and the
- * cookie it sets, without navigating the iframe away from the page the
- * user is on. If the frame never reports that it loaded, the tab shows a
- * message, a retry, and a direct link to the tablet.
+ * The iframe loads a Home Assistant proxy URL with a session in its path,
+ * not the tablet, in a sandbox without allow-same-origin: the tablet's page
+ * can't reach Home Assistant's storage or tokens. Opening the tablet again,
+ * or Retry, asks for a new session. If the frame never reports that it
+ * loaded, the tab shows a message, a retry, and a direct link to the tablet.
+ * Open in new tab goes to the tablet directly, never through the proxy.
  *
  * `ha-panel-custom` does not give this element a height, so percentage
  * heights collapse and the iframe stays a short strip. `_fit` measures the
@@ -56,7 +58,6 @@ class KioskMgmtPanel extends LitElement {
     this._unsub = null;
     this._pending = false;
     this._timer = 0;
-    this._renewTimer = 0;
     this._signGen = 0;
     this._fitQueued = 0;
     this._observer = null;
@@ -222,14 +223,13 @@ class KioskMgmtPanel extends LitElement {
       if (generation !== this._signGen) {
         return;
       }
-      this._openUrl = result.url;
+      this._openUrl = result.direct_url || kiosk.url;
       if (navigate) {
         this._iframeUrl = result.url;
         this._frame = "pending";
         this._problem = null;
         this._armLoadTimer();
       }
-      this._armRenew(result.expires_in);
     } catch (_err) {
       if (generation !== this._signGen) {
         return;
@@ -248,55 +248,19 @@ class KioskMgmtPanel extends LitElement {
     }, FRAME_LOAD_TIMEOUT_MS);
   }
 
-  _armRenew(expiresIn) {
-    const seconds = Number(expiresIn) || 300;
-    const delay = Math.max(15, seconds - 60) * 1000;
-    this._renewTimer = window.setTimeout(() => this._renew(), delay);
-  }
-
-  async _renew() {
-    const kiosk = this._kiosk;
-    if (!kiosk || !this.hass) {
-      return;
-    }
-    try {
-      const result = await this.hass.connection.sendMessagePromise({
-        type: "kiosk_mgmt/sign_proxy",
-        kiosk_id: kiosk.id,
-      });
-      this._openUrl = result.url;
-      // Refresh the cookie. redirect:manual still stores Set-Cookie and
-      // does not replace the document the iframe is showing.
-      await fetch(result.url, {
-        credentials: "same-origin",
-        redirect: "manual",
-        cache: "no-store",
-      });
-      this._armRenew(result.expires_in);
-    } catch (_err) {
-      this._armRenew(60);
-    }
-  }
-
   _clearTimers() {
     if (this._timer) {
       window.clearTimeout(this._timer);
       this._timer = 0;
     }
-    if (this._renewTimer) {
-      window.clearTimeout(this._renewTimer);
-      this._renewTimer = 0;
-    }
   }
 
   _handleMessage(event) {
-    if (event.origin !== window.location.origin) {
+    const frame = this.renderRoot?.querySelector("iframe");
+    if (!fromOwnFrame(event, frame?.contentWindow)) {
       return;
     }
     const data = event.data;
-    if (!data || data.source !== PROXY_SOURCE) {
-      return;
-    }
     if (data.kind === "subresource") {
       this._problem = {
         status: data.status,
@@ -403,7 +367,7 @@ class KioskMgmtPanel extends LitElement {
           <strong>${kiosk.online ? "Online" : "Offline"}</strong>
         </div>
         <div><span>Last seen</span><strong>${seen}</strong></div>
-        <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a>
+        <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open tablet directly</a>
       </section>
       ${this._problem
         ? html`<div class="banner" role="status">
@@ -425,9 +389,6 @@ class KioskMgmtPanel extends LitElement {
               <div class="actions">
                 <button class="button" @click=${this._retry}>Retry</button>
                 <a class="button" href=${openUrl} target="_blank" rel="noopener noreferrer"
-                  >Open in new tab</a
-                >
-                <a class="button quiet-link" href=${kiosk.url} target="_blank" rel="noopener noreferrer"
                   >Open tablet directly</a
                 >
               </div>
@@ -437,6 +398,8 @@ class KioskMgmtPanel extends LitElement {
             <iframe
               title=${`Admin for ${kiosk.name}`}
               src=${this._iframeUrl}
+              sandbox=${FRAME_SANDBOX}
+              referrerpolicy="no-referrer"
               @error=${() => {
                 this._frame = "failed";
               }}

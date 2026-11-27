@@ -17,57 +17,78 @@ from typing import Any
 
 from aiohttp import ClientSession, web
 
-from custom_components.kiosk_mgmt.proxy import signed_proxy_url
 from tests.fake_kiosk import serve
-from tests.test_proxy import _admin_refresh, _entry
+from tests.test_proxy import _entry, admin_prefix
 
 _CHROME = shutil.which("google-chrome") or shutil.which("chromium")
 
 
-async def _evaluate(debug_port: int, expression: str) -> Any:
-    """Run one expression in the first page target and return its value."""
+async def _cdp(websocket: Any, counter: list[int], method: str, **params: Any) -> Any:
+    """Send one DevTools command and return its result."""
+    counter[0] += 1
+    ident = counter[0]
+    await websocket.send_json({"id": ident, "method": method, "params": params})
+    while True:
+        message = await websocket.receive_json()
+        if message.get("id") == ident:
+            return message.get("result", {})
+
+
+async def _evaluate(debug_port: int, expression: str, *, in_frame: bool = False) -> Any:
+    """Run one expression in the page, or inside the panel's iframe.
+
+    The iframe is sandboxed without allow-same-origin, so the page can't
+    reach into it (``contentDocument`` is null). DevTools can: in its own
+    process (a separate ``iframe`` target) or as an isolated world in the
+    page's frame tree.
+    """
     async with (
         ClientSession() as session,
         session.get(f"http://127.0.0.1:{debug_port}/json/list") as response,
     ):
         targets = await response.json()
     page = next(item for item in targets if item.get("type") == "page")
+    frame_target = next(
+        (item for item in targets if item.get("type") == "iframe"), None
+    )
+    target = frame_target if in_frame and frame_target else page
+    counter = [0]
     async with (
         ClientSession() as session,
-        session.ws_connect(page["webSocketDebuggerUrl"]) as websocket,
+        session.ws_connect(target["webSocketDebuggerUrl"]) as websocket,
     ):
-        await websocket.send_json(
-            {
-                "id": 1,
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": expression,
-                    "returnByValue": True,
-                    "awaitPromise": True,
-                },
-            }
-        )
-        message = await websocket.receive_json()
-    result = message["result"]["result"]
+        params: dict[str, Any] = {
+            "expression": expression,
+            "returnByValue": True,
+            "awaitPromise": True,
+        }
+        if in_frame and frame_target is None:
+            tree = await _cdp(websocket, counter, "Page.getFrameTree")
+            children = tree.get("frameTree", {}).get("childFrames") or []
+            if not children:
+                return None
+            world = await _cdp(
+                websocket,
+                counter,
+                "Page.createIsolatedWorld",
+                frameId=children[0]["frame"]["id"],
+                worldName="kiosk-mgmt-test",
+            )
+            params["contextId"] = world["executionContextId"]
+        message = await _cdp(websocket, counter, "Runtime.evaluate", **params)
+    result = message.get("result", {})
     if "value" in result:
         return result["value"]
     return None
 
 
-_MEASURE = """
+_MEASURE_PANEL = """
 (() => {
   const el = document.querySelector("kiosk-mgmt-panel");
   const frame = el && el.shadowRoot && el.shadowRoot.querySelector("iframe");
-  const doc = frame && frame.contentDocument;
-  const password = doc && doc.querySelector("#password");
-  const box = password ? password.getBoundingClientRect() : null;
-  const text = doc && doc.body ? doc.body.innerText : "";
   return {
-    text,
-    shim: doc && doc.documentElement.dataset.kioskMgmtShim || "",
-    passwordTop: box ? box.top : null,
-    passwordBottom: box ? box.bottom : null,
-    viewHeight: doc ? doc.documentElement.clientHeight : 0,
+    sandbox: frame ? frame.getAttribute("sandbox") : null,
+    reachable: Boolean(frame && frame.contentDocument),
     frameHeight: frame ? frame.getBoundingClientRect().height : 0,
     frameWidth: frame ? frame.getBoundingClientRect().width : 0,
     hostHeight: el ? el.getBoundingClientRect().height : 0,
@@ -75,12 +96,25 @@ _MEASURE = """
 })()
 """
 
+_MEASURE_FRAME = """
+(() => {
+  const password = document.querySelector("#password");
+  const box = password ? password.getBoundingClientRect() : null;
+  return {
+    text: document.body ? document.body.innerText : "",
+    shim: document.documentElement.dataset.kioskMgmtShim || "",
+    origin: String(window.origin),
+    passwordTop: box ? box.top : null,
+    passwordBottom: box ? box.bottom : null,
+    viewHeight: document.documentElement.clientHeight,
+  };
+})()
+"""
+
 _LOGIN = """
 (() => {
-  const frame = document.querySelector("kiosk-mgmt-panel").shadowRoot.querySelector("iframe");
-  const doc = frame.contentDocument;
-  doc.querySelector("#password").value = "secret";
-  doc.querySelector("#loginBtn").click();
+  document.querySelector("#password").value = "secret";
+  document.querySelector("#loginBtn").click();
   return true;
 })()
 """
@@ -137,7 +171,9 @@ async def _wait_for(
     deadline = loop.time() + _READY_TIMEOUT
     value: dict[str, Any] = {}
     while True:
-        value = await _evaluate(debug_port, _MEASURE) or {}
+        inside = await _evaluate(debug_port, _MEASURE_FRAME, in_frame=True) or {}
+        outside = await _evaluate(debug_port, _MEASURE_PANEL) or {}
+        value = {**inside, **outside}
         if ready(value):
             return value
         if loop.time() >= deadline:
@@ -173,11 +209,11 @@ async def _chrome(url: str, width: int, height: int):
 
 async def _panel_page(hass: Any, hass_client: Any, kiosk: Any) -> str:
     """Register the panel harness and return its URL."""
-    signed = signed_proxy_url(
-        hass,
-        hass.config_entries.async_entries("kiosk_mgmt")[0].entry_id,
-        "manual:1",
-        refresh_token_id=await _admin_refresh(hass),
+    signed = (
+        await admin_prefix(
+            hass, hass.config_entries.async_entries("kiosk_mgmt")[0].entry_id
+        )
+        + "/"
     )
     page = f"""<!DOCTYPE html>
 <html><head>
@@ -208,7 +244,7 @@ el.hass = {{
       return Promise.resolve(() => {{}});
     }},
     sendMessagePromise() {{
-      return Promise.resolve({{url: signed, expires_in: 300}});
+      return Promise.resolve({{url: signed, expires_in: 43200, direct_url: {json.dumps(kiosk.origin + "/")}}});
     }}
   }},
   callService() {{ return Promise.resolve(); }}
@@ -246,6 +282,10 @@ async def test_panel_iframe_fills_and_login_reaches_the_tablet(
             value = await _wait_for(debug_port, _login_card_ready)
             lines = _visible_lines(value)
             assert value.get("shim") == "1", value
+            # Sandboxed: the page runs on an opaque origin the panel can't reach.
+            assert value["origin"] == "null", value
+            assert value["reachable"] is False, value
+            assert "allow-same-origin" not in value["sandbox"], value
             assert value["frameHeight"] > 400, value
             assert value["frameWidth"] > 1000, value
             assert value["hostHeight"] > value["frameHeight"], value
@@ -254,7 +294,7 @@ async def test_panel_iframe_fills_and_login_reaches_the_tablet(
             assert _LOGIN_HEADING in lines, value
             assert _SPLASH_TEXT not in lines, value
 
-            await _evaluate(debug_port, _LOGIN)
+            await _evaluate(debug_port, _LOGIN, in_frame=True)
             # Login leaves the card and opens the admin shell. Wait for that
             # shell's heading, not the first text that shares a word with it.
             value = await _wait_for(debug_port, _admin_ready)

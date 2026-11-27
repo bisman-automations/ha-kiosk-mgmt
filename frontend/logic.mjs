@@ -23,6 +23,31 @@ export function frameMode(proxyUrl, frameState) {
 /** How long to wait for the proxied page before showing the retry card. */
 export const FRAME_LOAD_TIMEOUT_MS = 8000;
 
+/**
+ * The iframe's sandbox. No allow-same-origin: the tablet's page runs on an
+ * opaque origin and can't reach Home Assistant's storage or tokens. The
+ * proxy sends the same policy as a header (const.PROXY_SANDBOX).
+ */
+export const FRAME_SANDBOX =
+  "allow-scripts allow-forms allow-popups allow-modals allow-downloads";
+
+/**
+ * True when a postMessage came from the panel's own iframe. A sandboxed
+ * page's origin is "null", so the sender window is what is checked.
+ *
+ * @param {{ source?: unknown, data?: any }} event
+ * @param {unknown} frameWindow the iframe's contentWindow
+ */
+export function fromOwnFrame(event, frameWindow) {
+  return Boolean(
+    frameWindow &&
+      event &&
+      event.source === frameWindow &&
+      event.data &&
+      event.data.source === PROXY_SOURCE,
+  );
+}
+
 /** postMessage source the proxy hook and error page both use. */
 export const PROXY_SOURCE = "kiosk-mgmt-proxy";
 

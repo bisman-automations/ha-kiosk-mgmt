@@ -11,9 +11,9 @@ from homeassistant.components.websocket_api import ActiveConnection
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import DOMAIN, SIGNAL_KIOSKS_UPDATED, SIGNED_PATH_SECONDS, WS_SIGN_PROXY
+from .const import DOMAIN, PROXY_SESSION_SECONDS, SIGNAL_KIOSKS_UPDATED, WS_SIGN_PROXY
 from .coordinator import KioskCoordinator
-from .proxy import signed_proxy_url
+from .proxy import async_proxy_url
 from .records import record_admin_url
 
 
@@ -78,29 +78,27 @@ async def ws_sign_proxy(
     connection: ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Return a short-lived proxy URL for one tablet.
+    """Return a proxy URL with a fresh session for one tablet.
 
-    The signature is tied to this admin's refresh token. The panel puts it
-    on the iframe and refreshes it before it expires. The first response
-    sets the cookie that later requests from the embedded page send.
+    The session names this administrator and lasts
+    ``PROXY_SESSION_SECONDS``. The panel opens it in a sandboxed iframe and
+    asks again when the tablet is opened again or Retry is pressed.
     """
     coordinator = _coordinator(hass)
     kiosk_id = str(msg["kiosk_id"])
     record = coordinator.records.get(kiosk_id) if coordinator is not None else None
+    user = connection.user
     if coordinator is None or record is None or record.get("ignored"):
         connection.send_error(msg["id"], "not_found", "Unknown kiosk")
         return
-    url = signed_proxy_url(
-        hass,
-        coordinator.config_entry.entry_id,
-        kiosk_id,
-        refresh_token_id=connection.refresh_token_id,
+    url = await async_proxy_url(
+        hass, coordinator.config_entry.entry_id, kiosk_id, user.id
     )
     connection.send_result(
         msg["id"],
         {
             "url": url,
-            "expires_in": SIGNED_PATH_SECONDS,
+            "expires_in": PROXY_SESSION_SECONDS,
             "direct_url": record_admin_url(record),
         },
     )

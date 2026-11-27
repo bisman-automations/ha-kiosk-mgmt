@@ -557,6 +557,12 @@
     return "iframe";
   }
   var FRAME_LOAD_TIMEOUT_MS = 8e3;
+  var FRAME_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals allow-downloads";
+  function fromOwnFrame(event, frameWindow) {
+    return Boolean(
+      frameWindow && event && event.source === frameWindow && event.data && event.data.source === PROXY_SOURCE
+    );
+  }
   var PROXY_SOURCE = "kiosk-mgmt-proxy";
   function panelHeightPx(box) {
     const top = Number(box.top);
@@ -640,7 +646,6 @@
       this._unsub = null;
       this._pending = false;
       this._timer = 0;
-      this._renewTimer = 0;
       this._signGen = 0;
       this._fitQueued = 0;
       this._observer = null;
@@ -788,14 +793,13 @@
         if (generation !== this._signGen) {
           return;
         }
-        this._openUrl = result.url;
+        this._openUrl = result.direct_url || kiosk.url;
         if (navigate) {
           this._iframeUrl = result.url;
           this._frame = "pending";
           this._problem = null;
           this._armLoadTimer();
         }
-        this._armRenew(result.expires_in);
       } catch (_err) {
         if (generation !== this._signGen) {
           return;
@@ -812,50 +816,18 @@
         }
       }, FRAME_LOAD_TIMEOUT_MS);
     }
-    _armRenew(expiresIn) {
-      const seconds = Number(expiresIn) || 300;
-      const delay = Math.max(15, seconds - 60) * 1e3;
-      this._renewTimer = window.setTimeout(() => this._renew(), delay);
-    }
-    async _renew() {
-      const kiosk = this._kiosk;
-      if (!kiosk || !this.hass) {
-        return;
-      }
-      try {
-        const result = await this.hass.connection.sendMessagePromise({
-          type: "kiosk_mgmt/sign_proxy",
-          kiosk_id: kiosk.id
-        });
-        this._openUrl = result.url;
-        await fetch(result.url, {
-          credentials: "same-origin",
-          redirect: "manual",
-          cache: "no-store"
-        });
-        this._armRenew(result.expires_in);
-      } catch (_err) {
-        this._armRenew(60);
-      }
-    }
     _clearTimers() {
       if (this._timer) {
         window.clearTimeout(this._timer);
         this._timer = 0;
       }
-      if (this._renewTimer) {
-        window.clearTimeout(this._renewTimer);
-        this._renewTimer = 0;
-      }
     }
     _handleMessage(event) {
-      if (event.origin !== window.location.origin) {
+      const frame = this.renderRoot?.querySelector("iframe");
+      if (!fromOwnFrame(event, frame?.contentWindow)) {
         return;
       }
       const data = event.data;
-      if (!data || data.source !== PROXY_SOURCE) {
-        return;
-      }
       if (data.kind === "subresource") {
         this._problem = {
           status: data.status,
@@ -952,7 +924,7 @@
           <strong>${kiosk.online ? "Online" : "Offline"}</strong>
         </div>
         <div><span>Last seen</span><strong>${seen}</strong></div>
-        <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a>
+        <a href=${openUrl} target="_blank" rel="noopener noreferrer">Open tablet directly</a>
       </section>
       ${this._problem ? b2`<div class="banner" role="status">
             ${subresourceNotice(this._problem.status, this._problem.via)}
@@ -971,9 +943,6 @@
               <div class="actions">
                 <button class="button" @click=${this._retry}>Retry</button>
                 <a class="button" href=${openUrl} target="_blank" rel="noopener noreferrer"
-                  >Open in new tab</a
-                >
-                <a class="button quiet-link" href=${kiosk.url} target="_blank" rel="noopener noreferrer"
                   >Open tablet directly</a
                 >
               </div>
@@ -982,6 +951,8 @@
             <iframe
               title=${`Admin for ${kiosk.name}`}
               src=${this._iframeUrl}
+              sandbox=${FRAME_SANDBOX}
+              referrerpolicy="no-referrer"
               @error=${() => {
         this._frame = "failed";
       }}

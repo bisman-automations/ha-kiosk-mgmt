@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-27
+
+### Security
+
+- **The tablet's page is kept apart from Home Assistant.** The admin page shown in the panel ran as part of Home Assistant, so anything on a tablet's page, or on a device on your network pretending to be a tablet, could have used your Home Assistant login. It now runs in a sandbox, in the panel and anywhere else it's opened: it can't see your Home Assistant login or storage, and it can't do anything in Home Assistant as you.
+- **Kiosk Mgmt signs its links with a key of its own.** It used to borrow the key Home Assistant uses for its own temporary links. It now keeps a random key in its own storage and leaves Home Assistant's alone.
+
+### Changed
+
+- **Log in each time you open a tablet.** Because of the sandbox, the tablet's page can't keep your tablet login once you open the tablet again or reload it.
+- **Open tablet directly** replaces **Open in new tab**. It opens the tablet's own address on your home network instead of the page through Home Assistant.
+- The panel's link to a tablet now works for 12 hours. Opening the tablet again, or **Retry**, gets a new one.
+
 ## [0.1.10] - 2026-11-22
 
 ### Fixed
@@ -130,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.2.0]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.7...v0.1.8

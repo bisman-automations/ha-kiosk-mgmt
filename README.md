@@ -93,14 +93,21 @@ change. Reconfiguring the tablet offers the same choice.
 
 **Kiosk Mgmt** is in the sidebar for administrators. Each tablet is a tab
 with its name, IP address, model, whether it is online, and when it was last
-seen, plus **Open in new tab**.
+seen, plus **Open tablet directly**.
 
 The admin page is loaded through Home Assistant, not straight from the
 tablet, and the embedded page fills the tab. That is what lets the tab show
 a self-signed certificate, and a plain HTTP tablet, while Home Assistant
 itself is open over HTTPS. Log in with the password you set on the tablet.
-Only an administrator can open the proxied page. **Open in new tab** uses
-the same proxied address.
+Only an administrator can open the proxied page, and each time you open a
+tablet the panel gets a new link that works for 12 hours.
+
+The tablet's page runs in a sandbox, kept apart from Home Assistant: it
+can't see your Home Assistant login or do anything in Home Assistant as
+you. Because of that the tablet forgets your login when you open it again
+or reload it, so log in again each time. **Open tablet directly** opens the
+tablet's own address in a new tab (on your home network), not the proxied
+page.
 
 Styles, scripts and live updates from the tablet load through that same
 address, including the login request. If part of the page fails, the tab

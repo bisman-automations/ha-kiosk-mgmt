@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FRAME_SANDBOX,
   frameMode,
+  fromOwnFrame,
   panelHeightPx,
   stretchedContainerBottom,
   subresourceNotice,
 } from "../frontend/logic.mjs";
 import {
   installNetworkShim,
+  installSandboxStorage,
+  memoryStorage,
   relocateAuthorization,
   rewriteUrl,
 } from "../frontend/shim.mjs";
@@ -278,4 +282,63 @@ test("Refresh loads the admin page again, not only the details", async () => {
   assert.match(body, /catch \(err\)/);
   assert.match(body, /this\._retry\(\)/);
   assert.match(source, /\?disabled=\$\{this\._refreshing\}/);
+});
+
+test("the iframe sandbox never shares Home Assistant's origin", () => {
+  assert.ok(FRAME_SANDBOX.includes("allow-scripts"));
+  assert.ok(!FRAME_SANDBOX.includes("allow-same-origin"));
+  assert.ok(!FRAME_SANDBOX.includes("allow-top-navigation"));
+});
+
+test("only messages from the panel's own iframe count", () => {
+  const frame = {};
+  const data = { source: "kiosk-mgmt-proxy", ok: true };
+  assert.equal(fromOwnFrame({ source: frame, data }, frame), true);
+  assert.equal(fromOwnFrame({ source: {}, data }, frame), false);
+  assert.equal(fromOwnFrame({ source: frame, data: { source: "other" } }, frame), false);
+  assert.equal(fromOwnFrame({ source: frame, data }, null), false);
+});
+
+test("a sandboxed page gets working storage and cookies", () => {
+  const throwing = () => {
+    throw new Error("SecurityError");
+  };
+  const target = {
+    document: {},
+  };
+  Object.defineProperty(target, "localStorage", { get: throwing, configurable: true });
+  Object.defineProperty(target, "sessionStorage", { get: throwing, configurable: true });
+  Object.defineProperty(target.document, "cookie", { get: throwing, set: throwing, configurable: true });
+  installSandboxStorage(target);
+  target.sessionStorage.setItem("ks_token", "abc");
+  assert.equal(target.sessionStorage.getItem("ks_token"), "abc");
+  assert.equal(target.sessionStorage.length, 1);
+  assert.equal(target.localStorage.getItem("missing"), null);
+  target.document.cookie = "a=1; Path=/";
+  target.document.cookie = "b=2";
+  assert.equal(target.document.cookie, "a=1; b=2");
+});
+
+test("a page that isn't sandboxed keeps its own storage", () => {
+  const own = memoryStorage();
+  own.setItem("x", "1");
+  const target = { localStorage: own, sessionStorage: own, document: { cookie: "c=3" } };
+  installSandboxStorage(target);
+  assert.equal(target.localStorage, own);
+  assert.equal(target.document.cookie, "c=3");
+});
+
+test("the shim posts to the panel without naming an origin", () => {
+  const sent = [];
+  const target = {
+    location: { origin: "null" },
+    parent: {
+      postMessage(message, origin) {
+        sent.push(origin);
+      },
+    },
+    document: { documentElement: { dataset: {} } },
+  };
+  installNetworkShim(target, CTX);
+  assert.deepEqual(sent, ["*"]);
 });

@@ -143,17 +143,103 @@ export function relocateAuthorization(headers) {
  *   pageHost?: string,
  * }} ctx
  */
+/**
+ * An in-memory Storage. A page sandboxed without allow-same-origin throws on
+ * localStorage and sessionStorage, and the tablet's admin page keeps its
+ * session there. It lasts as long as the page, like sessionStorage.
+ */
+export function memoryStorage() {
+  const items = new Map();
+  return {
+    get length() {
+      return items.size;
+    },
+    key(index) {
+      return [...items.keys()][index] ?? null;
+    },
+    getItem(name) {
+      const value = items.get(String(name));
+      return value === undefined ? null : value;
+    },
+    setItem(name, value) {
+      items.set(String(name), String(value));
+    },
+    removeItem(name) {
+      items.delete(String(name));
+    },
+    clear() {
+      items.clear();
+    },
+  };
+}
+
+/**
+ * Give a sandboxed page working storage and cookies. Each one is replaced
+ * only when using it throws, so a page that isn't sandboxed keeps its own.
+ */
+export function installSandboxStorage(target) {
+  for (const name of ["localStorage", "sessionStorage"]) {
+    let usable = false;
+    try {
+      usable = Boolean(target[name]);
+    } catch (_err) {
+      usable = false;
+    }
+    if (!usable) {
+      try {
+        Object.defineProperty(target, name, {
+          value: memoryStorage(),
+          configurable: true,
+        });
+      } catch (_err) {
+        // Nothing more to do; the page will report its own error.
+      }
+    }
+  }
+  const doc = target.document;
+  if (!doc) {
+    return;
+  }
+  try {
+    void doc.cookie;
+  } catch (_err) {
+    const jar = new Map();
+    try {
+      Object.defineProperty(doc, "cookie", {
+        configurable: true,
+        get() {
+          return [...jar].map(([key, value]) => `${key}=${value}`).join("; ");
+        },
+        set(text) {
+          const pair = String(text).split(";", 1)[0];
+          const at = pair.indexOf("=");
+          if (at > 0) {
+            jar.set(pair.slice(0, at).trim(), pair.slice(at + 1).trim());
+          }
+        },
+      });
+    } catch (_err2) {
+      // Leave it; a page that needs cookies will say so.
+    }
+  }
+}
+
 export function installNetworkShim(target, ctx) {
   const rewrite = (url) => rewriteUrl(String(url), ctx);
   const source = ctx.source;
   let reported = false;
 
+  installSandboxStorage(target);
+
   const post = (message) => {
     try {
       const parent = target.parent || target;
-      parent.postMessage(message, target.location.origin);
+      // The page is sandboxed on an opaque origin, so it can't name the
+      // panel's origin. The messages say only whether the page loaded; the
+      // panel checks they come from its own iframe.
+      parent.postMessage(message, "*");
     } catch (_err) {
-      // The panel is same-origin. A test stand-in with no parent still installed.
+      // A test stand-in with no parent still installed.
     }
   };
 

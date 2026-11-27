@@ -96,11 +96,24 @@ repair and does not update the pin until the user accepts the new
 certificate. Entries from 1.1 (`verify_ssl` false, no fingerprint) are
 migrated to 1.2 and pinned on the next successful probe.
 
-The panel does not embed the tablet directly. The iframe loads
-`/api/kiosk_mgmt/proxy/{entry_id}/{kiosk_id}/` with a short-lived signed
-path (`async_sign_path`). That response sets an HttpOnly cookie so the
-embedded app's later requests, including POST and websockets, are
-authorized. The cookie covers every method and every path under the prefix.
+The panel does not embed the tablet directly, and the tablet's page never
+runs on Home Assistant's origin (hacs/default#14090). The iframe loads
+`/api/kiosk_mgmt/proxy/{entry_id}/{kiosk_id}/{session}/`. The session is an
+HMAC-signed token (admin user id, entry, kiosk, expiry,
+`PROXY_SESSION_SECONDS`) made by `kiosk_mgmt/sign_proxy`, signed with Kiosk
+Mgmt's own random key (`tls.async_load_proxy_key`, Store
+`kiosk_mgmt.proxy_key`); Home Assistant's `DATA_SIGN_SECRET` is never used.
+Every response carries `Content-Security-Policy: sandbox ...` without
+`allow-same-origin` (`PROXY_SANDBOX`, `SANDBOX_HEADERS`), and the iframe has
+the same `sandbox` (`FRAME_SANDBOX` in `logic.mjs`). A sandboxed page has no
+cookies, which is why the session is in the path, and its requests back are
+cross-origin: the proxy sends `Access-Control-Allow-Origin: *` (never
+credentials) and answers preflights itself (`_preflight`). The view's
+`register` leaves out Home Assistant's CORS, which refuses origin "null".
+The shim gives the page in-memory `localStorage`, `sessionStorage` and
+`document.cookie` (`installSandboxStorage`) and posts to the panel with
+target `"*"`; the panel accepts only messages from its own iframe
+(`fromOwnFrame`). Open tablet directly links to the tablet, never the proxy.
 `ha-panel-custom` has no height of its own, so the panel sets its own
 pixel height from the viewport and the iframe fills what remains.
 The panel's `shouldUpdate` skips an update where only `hass` changed

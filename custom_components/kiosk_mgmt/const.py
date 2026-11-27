@@ -61,14 +61,17 @@ FRAME_LOAD_TIMEOUT_MS: Final = 8000
 # instead of this pin.
 ATTR_CERT_SHA256: Final = "cert_sha256"
 
-# How long a signed proxy URL and its session cookie stay valid. The panel
-# refreshes both before they expire. Short on purpose: the URL is enough to
-# open the tablet's admin page.
-SIGNED_PATH_SECONDS: Final = 300
+# How long a proxy session lasts. The session is part of the proxy path
+# (the sandboxed page has no cookies), so the panel asks for a new one each
+# time a tablet is opened, and Retry gets a new one after it expires.
+PROXY_SESSION_SECONDS: Final = 12 * 60 * 60
 
-# Iframe subresources cannot send the Home Assistant bearer token. The proxy
-# sets this cookie after a signed or bearer request from an admin.
-PROXY_COOKIE: Final = "kiosk_mgmt_proxy"
+# Every proxied response runs in a sandbox without allow-same-origin, so the
+# tablet's page never shares Home Assistant's origin, storage or tokens
+# (hacs/default#14090). The panel's iframe has the same sandbox.
+PROXY_SANDBOX: Final = (
+    "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads"
+)
 
 # Served by the proxy itself, not fetched from the tablet.
 PROXY_HOOK: Final = "__kiosk_mgmt__/hook.js"
@@ -82,7 +85,7 @@ CONF_SCHEME: Final = "scheme"
 CONF_VERIFY_SSL: Final = "verify_ssl"
 CONF_KIOSK_ID: Final = "kiosk_id"
 
-# Websocket command the panel uses to mint a signed proxy URL.
+# Websocket command the panel uses to get a proxy URL with a fresh session.
 WS_SIGN_PROXY: Final = "kiosk_mgmt/sign_proxy"
 
 # options["kiosks"] is a dict of these records, keyed by stable id.

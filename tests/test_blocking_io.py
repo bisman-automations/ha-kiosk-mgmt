@@ -17,11 +17,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.kiosk_mgmt import proxy
 from custom_components.kiosk_mgmt.const import DOMAIN
-from custom_components.kiosk_mgmt.proxy import async_load_shim, proxy_prefix
+from custom_components.kiosk_mgmt.proxy import async_load_shim
 from custom_components.kiosk_mgmt.tls import unverified_context
 from homeassistant.util.ssl import get_default_no_verify_context
 from tests.fake_kiosk import serve
 from tests.test_pinning import _record
+from tests.test_proxy import admin_prefix
 
 _REAL_READ = proxy._read_shim_source
 
@@ -68,7 +69,7 @@ async def test_shim_is_read_once_in_the_executor_and_cached(
             assert spy.calls == 1, "the shim is read during setup"
             assert loop_thread not in spy.threads, "and not on the event loop"
 
-            prefix = proxy_prefix(entry.entry_id, "manual:1")
+            prefix = await admin_prefix(hass, entry.entry_id)
             admin = await hass_client()
             for _ in range(3):
                 hook = await admin.get(f"{prefix}/__kiosk_mgmt__/hook.js")
@@ -98,7 +99,7 @@ async def test_unreadable_shim_does_not_break_setup_and_is_retried(
     async with serve() as kiosk:
         with patch.object(proxy, "_read_shim_source", _ReadSpy(fail=True)):
             entry = await _setup(hass, kiosk.host, kiosk.port, kiosk.fingerprint)
-            prefix = proxy_prefix(entry.entry_id, "manual:1")
+            prefix = await admin_prefix(hass, entry.entry_id)
             admin = await hass_client()
             broken = await admin.get(f"{prefix}/__kiosk_mgmt__/hook.js")
             assert broken.status == 500
