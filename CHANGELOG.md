@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-11-27
+
+### Changed
+
+- **The Kiosk Mgmt page opens faster.** Your browser now keeps the page's script instead of downloading it again every time you open it. After an update it loads the new one.
+
 ## [0.2.1] - 2026-11-27
 
 ### Security
@@ -149,6 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore or remove a tablet. An ignored tablet stays hidden when it is
   discovered again.
 
+[0.2.2]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/bisman-automations/ha-kiosk-mgmt/compare/v0.1.9...v0.1.10

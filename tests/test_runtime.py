@@ -264,7 +264,15 @@ async def test_panel_is_admin_only(hass: Any, monkeypatch: Any) -> None:
     panel = hass.data[DATA_PANELS]["kiosk-mgmt"]
     assert panel.require_admin is True
     assert panel.sidebar_title == "Kiosk Mgmt"
-    assert panel.config["_panel_custom"]["js_url"] == "/kiosk_mgmt/kiosk-mgmt-panel.js"
+    # The version in the script's URL makes browsers load the new script after
+    # an update (the script is served with cache headers).
+    from homeassistant.loader import async_get_integration
+
+    version = (await async_get_integration(hass, DOMAIN)).version
+    assert (
+        panel.config["_panel_custom"]["js_url"]
+        == f"/kiosk_mgmt/kiosk-mgmt-panel.js?v={version}"
+    )
     assert hass.data[DOMAIN]["static"] is True
 
 
